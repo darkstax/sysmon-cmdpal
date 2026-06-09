@@ -1,0 +1,35 @@
+# SDK junction
+PowerToys-sdk/
+
+# .NET
+bin/
+obj/
+*.user
+*.suo
+*.vs/
+.vs/
+
+# Publish
+SysMonCmdPal/bin/publish/
+
+# IDE
+.idea/
+*.swp
+*.sln.docstates
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Keep publish profiles (required by Windows App SDK)
+!**/Properties/PublishProfiles/*.pubxml
+!**/Properties/launchSettings.json
+
+# Generated code / certificates
+SysMonCmdPal/Generated Files/
+*.pfx
+*.cer
+
+# Generated files
+*.g.cs

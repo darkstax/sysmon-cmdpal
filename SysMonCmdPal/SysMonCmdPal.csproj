@@ -1,0 +1,77 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <RootNamespace>SysMonCmdPal</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <UseWinUI>false</UseWinUI>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <GenerateAppxPackageOnBuild>true</GenerateAppxPackageOnBuild>
+    <PackageCertificateKeyFile>SysMonCmdPal_TemporaryKey.pfx</PackageCertificateKeyFile>
+    <PackageCertificateThumbprint>E4413FD3511C75288054D6EADE74783AF95031D5</PackageCertificateThumbprint>
+    <PackageCertificatePassword>SysMonCmdPal</PackageCertificatePassword>
+    <PublishProfile>win-$(Platform).pubxml</PublishProfile>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>preview</LangVersion>
+
+    <!-- AOT/Trim for Release -->
+    <PublishTrimmed Condition="'$(Configuration)' == 'Release'">true</PublishTrimmed>
+    <IsAotCompatible Condition="'$(Configuration)' == 'Release'">true</IsAotCompatible>
+    <CsWinRTAotOptimizerEnabled Condition="'$(Configuration)' == 'Release'">true</CsWinRTAotOptimizerEnabled>
+  </PropertyGroup>
+
+  <!-- LibreHardwareMonitorLib 依赖反射发现硬件类型，裁剪会破坏运行时传感器检测 -->
+  <ItemGroup>
+    <TrimmerRootAssembly Include="LibreHardwareMonitorLib" />
+  </ItemGroup>
+
+  <!-- ============================================================
+       SDK 来源：需要本地 PowerToys 仓库提供扩展 SDK
+       克隆到与本项目同级的目录：
+         git clone https://github.com/microsoft/PowerToys.git ../PowerToys
+       或者设置环境变量 POWERTOYS_REPO 指向已克隆的仓库
+       ============================================================ -->
+  <PropertyGroup>
+    <PowerToysRepo Condition="'$(POWERTOYS_REPO)' != ''">$(POWERTOYS_REPO)</PowerToysRepo>
+    <PowerToysRepo Condition="'$(PowerToysRepo)' == ''">$(MSBuildThisFileDirectory)..\..\PowerToys</PowerToysRepo>
+    <PowerToysRepo Condition="!Exists('$(PowerToysRepo)\src\modules\cmdpal\extensionsdk')">$(MSBuildThisFileDirectory)..\PowerToys-sdk</PowerToysRepo>
+    <ExtensionsSdkDir>$(PowerToysRepo)\src\modules\cmdpal\extensionsdk</ExtensionsSdkDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 本地 Toolkit 项目引用替代了 NuGet 包，避免类型冲突 -->
+    <PackageReference Include="Shmuelie.WinRTServer" Version="1.0.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.250205002" />
+    <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.162">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="LibreHardwareMonitorLib" Version="0.9.4" />
+    <!-- .NET 10 将 PerformanceCounter 拆分成了独立 NuGet 包 -->
+    <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="9.0.0" />
+    <PackageReference Include="System.Text.Json" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(ExtensionsSdkDir)\Microsoft.CommandPalette.Extensions.Toolkit\Microsoft.CommandPalette.Extensions.Toolkit.csproj" />
+  </ItemGroup>
+
+  <!-- Assets -->
+  <ItemGroup>
+    <Content Include="Assets\StoreLogo.png" />
+    <Content Include="Assets\Square150x150Logo.png" />
+    <Content Include="Assets\Square44x44Logo.png" />
+    <Content Include="Assets\Wide310x150Logo.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="Commands\" />
+    <Folder Include="Services\" />
+  </ItemGroup>
+
+</Project>
+

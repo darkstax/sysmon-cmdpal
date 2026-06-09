@@ -1,0 +1,5 @@
+aa60770 @ Finalize sysmon-cmdpal before monorepo merge
+1fbcc3a Add project CLAUDE.md — architecture, data collection, build guide
+b8a058d Update SDK to sparse checkout approach (~0.6MB instead of 2GB+)
+441dcee Add solution file, placeholder assets, and NuGet SDK reference
+b6eb645 Initial commit: sysmon-cmdpal — System Monitor extension for PowerToys Command Palette

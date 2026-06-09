@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "SysMonCmdPal (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "SysMonCmdPal (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}
