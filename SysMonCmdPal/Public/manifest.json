@@ -1,0 +1,11 @@
+{
+  "$schema": "https://aka.ms/cmdpal/extension-schema",
+  "id": "SysMonCmdPal",
+  "displayName": "System Monitor",
+  "description": "Real-time system monitor — CPU, memory, disk, network, and battery at a glance",
+  "publisher": "darkstax",
+  "version": "1.1.0.0",
+  "activation": {
+    "clsid": "A1B2C3D4-E5F6-7890-ABCD-EF1234567890"
+  }
+}

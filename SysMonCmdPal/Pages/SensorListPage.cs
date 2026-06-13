@@ -2,6 +2,7 @@
 // 传感器列表页 — 按类别展示所有 LHM 传感器，可点击添加/移除 Dock
 
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using Microsoft.CommandPalette.Extensions;
 using Microsoft.CommandPalette.Extensions.Toolkit;
@@ -46,7 +47,12 @@ internal sealed partial class SensorListPage : ListPage
             foreach (var r in readings.OrderBy(r => r.SensorName))
             {
                 bool inDock = _sensorSvc.IsInConfig(r.UniqueKey ?? "");
-                var cmd = new ToggleSensorCommand(r, inDock, () => { });
+                // CmdPal re-queries GetItems() on page navigation; the callback logs the action
+                // for diagnostics. Visual state (pin icon) updates when the page is next entered.
+                var cmd = new ToggleSensorCommand(r, inDock, () =>
+                {
+                    Debug.WriteLine($"[SysMon] Sensor toggled: {r.DisplayName} (now {(inDock ? "removed" : "added")})");
+                });
                 items.Add(new ListItem(cmd)
                 {
                     Title = $"{r.DisplayName}  =  {r.FormatValue()}",

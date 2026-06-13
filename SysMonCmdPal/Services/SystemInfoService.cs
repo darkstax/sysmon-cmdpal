@@ -1,7 +1,7 @@
 // Copyright (c) 2026 SysMonCmdPal
 // 系统信息采集服务 — 使用 Win32 API (P/Invoke) 获取基础指标。
 // 温度和 GPU 数据委托给 LhmSensorService（PawnIO 驱动，免管理员）。
-// 回退链: LHM (PawnIO) → AMD ADL (PMLOG) → HWiNFO 共享内存 → 不可用
+// 回退链: LHM NuGet (NVAPI) → LHM WMI (外部进程) → AMD ADL (PMLOG) → HWiNFO 共享内存 → 不可用
 
 using System;
 using System.Diagnostics;
@@ -15,11 +15,23 @@ namespace SysMonCmdPal;
 /// <summary>传感器后端状态 — 表示当前使用哪个数据源</summary>
 public enum SensorBackend
 {
-    /// <summary>LibreHardwareMonitor (PawnIO 驱动)，功能完整</summary>
+    /// <summary>PawnIO Intel MSR (ring0 模块)</summary>
+    PawnMsr,
+    /// <summary>PawnIO AMD SMU (ring0 模块)</summary>
+    PawnSmu,
+    /// <summary>NVIDIA NVAPI (nvapi64.dll)</summary>
+    Nvapi,
+    /// <summary>AMD ADL (atiadlxx.dll) — GPU 数据</summary>
+    AdlGpu,
+    /// <summary>Intel IGCL (igcl.dll)</summary>
+    Igcl,
+    /// <summary>LibreHardwareMonitor (PawnIO 驱动)</summary>
     Lhm,
-    /// <summary>AMD ADL PMLOG (atiadlxx.dll)，仅 CPU 温度</summary>
+    /// <summary>LHM 外部进程 WMI Provider</summary>
+    LhmWmi,
+    /// <summary>AMD ADL PMLOG (atiadlxx.dll) — CPU 温度</summary>
     AmdAdl,
-    /// <summary>HWiNFO 共享内存 (Global\HWiNFO_SENS_SM2)，需 HWiNFO 后台运行</summary>
+    /// <summary>HWiNFO 共享内存 (Global\HWiNFO_SENS_SM2)</summary>
     HwInfo,
     /// <summary>无可用传感器后端</summary>
     None,
@@ -37,7 +49,8 @@ public struct SystemSnapshot
     public string BatteryStatus;
     public DiskInfo[] Disks;
     public double CpuTemperature;       // °C, -1 if unavailable
-    public GpuInfo Gpu;                 // default(None) if no GPU detected
+    public GpuInfo Gpu;                 // 主 GPU（向后兼容）
+    public GpuInfo[] Gpus;              // 所有检测到的 GPU
     public SensorBackend Backend;       // 当前传感器数据源
     public string BackendNote;          // 后端状态描述（null=正常）
 }
@@ -109,22 +122,37 @@ public class SystemInfoService
 
     // ---- Disk IO counters (lazy-created per drive) ----
     private readonly Dictionary<string, (PerformanceCounter? Read, PerformanceCounter? Write)> _diskIOCounters = new();
+    private readonly object _diskIOLock = new();
 
     // ---- Network tracking ----
     private long _prevNetDown;
     private long _prevNetUp;
-    private DateTime _prevNetTime;
+    private DateTime _prevNetDownTime;
+    private DateTime _prevNetUpTime;
 
     public SystemSnapshot Current { get; private set; }
 
     private SystemInfoService()
     {
-        _prevNetTime = DateTime.UtcNow;
+        // 首次播种网络计数器（不计算速度，只记录基线）
+        try
+        {
+            _prevNetDown = ReadNetBytes(false);
+            _prevNetUp = ReadNetBytes(true);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[SysMon] Network baseline init: {ex.Message}");
+        }
+        _prevNetDownTime = DateTime.UtcNow;
+        _prevNetUpTime = DateTime.UtcNow;
 
         try { _cpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total"); }
         catch (Exception ex) { Debug.WriteLine($"[SysMon] CPU counter init failed: {ex.Message}"); _cpuCounter = null; }
 
-        try { Refresh(); } catch { }
+        // 初始化快照（LHM 在首次访问时惰性初始化）
+        try { Refresh(); }
+        catch (Exception ex) { Debug.WriteLine($"[SysMon] Initial Refresh(): {ex.Message}"); }
     }
 
     /// <summary>
@@ -141,7 +169,8 @@ public class SystemInfoService
             NetUp = ReadNetUp(now),
             Disks = ReadDisks(),
             CpuTemperature = -1,
-            Gpu = default,
+            Gpu = new GpuInfo { UsagePercent = -1, Temperature = -1 },
+            Gpus = [],
             Backend = SensorBackend.None,
         };
 
@@ -162,8 +191,9 @@ public class SystemInfoService
             if (_cpuCounter is null) return 0;
             return Math.Round(_cpuCounter.NextValue(), 1);
         }
-        catch
+        catch (Exception ex)
         {
+            Debug.WriteLine($"[SysMon] ReadCpuUsage: {ex.Message}");
             return 0;
         }
     }
@@ -182,8 +212,9 @@ public class SystemInfoService
                 snapshot.MemoryUsed = memStatus.dwMemoryLoad; // 0-100
             }
         }
-        catch
+        catch (Exception ex)
         {
+            Debug.WriteLine($"[SysMon] ReadMemory (GlobalMemoryStatusEx): {ex.Message}, falling back to GC");
             // fallback via GC
             snapshot.MemoryTotalBytes = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
         }
@@ -199,7 +230,8 @@ public class SystemInfoService
                 .Select(d =>
                 {
                     string label = "";
-                    try { label = d.VolumeLabel; } catch { }
+                    try { label = d.VolumeLabel; }
+                    catch (Exception ex) { Debug.WriteLine($"[SysMon] VolumeLabel ({d.Name}): {ex.Message}"); }
 
                     var di = new DiskInfo
                     {
@@ -219,22 +251,29 @@ public class SystemInfoService
                 })
                 .ToArray();
         }
-        catch
+        catch (Exception ex)
         {
+            Debug.WriteLine($"[SysMon] ReadDisks: {ex.Message}");
             return [];
         }
     }
 
     private void ReadDiskIO(string driveLetter, ref DiskInfo di)
     {
-        if (!_diskIOCounters.TryGetValue(driveLetter, out var counters))
+        (PerformanceCounter? Read, PerformanceCounter? Write) counters;
+        lock (_diskIOLock)
         {
-            counters = (CreateIOCounter(driveLetter, "Read"), CreateIOCounter(driveLetter, "Write"));
-            _diskIOCounters[driveLetter] = counters;
+            if (!_diskIOCounters.TryGetValue(driveLetter, out counters))
+            {
+                counters = (CreateIOCounter(driveLetter, "Read"), CreateIOCounter(driveLetter, "Write"));
+                _diskIOCounters[driveLetter] = counters;
+            }
         }
 
-        try { di.ReadBytesPerSec = counters.Read?.NextValue() ?? -1; } catch { }
-        try { di.WriteBytesPerSec = counters.Write?.NextValue() ?? -1; } catch { }
+        try { di.ReadBytesPerSec = counters.Read?.NextValue() ?? -1; }
+        catch (Exception ex) { Debug.WriteLine($"[SysMon] Disk read IO ({driveLetter}): {ex.Message}"); }
+        try { di.WriteBytesPerSec = counters.Write?.NextValue() ?? -1; }
+        catch (Exception ex) { Debug.WriteLine($"[SysMon] Disk write IO ({driveLetter}): {ex.Message}"); }
     }
 
     private static PerformanceCounter? CreateIOCounter(string drive, string rw)
@@ -243,43 +282,49 @@ public class SystemInfoService
         {
             return new PerformanceCounter("LogicalDisk", $"Disk {rw} Bytes/sec", drive);
         }
-        catch
+        catch (Exception ex)
         {
+            Debug.WriteLine($"[SysMon] CreateIOCounter ({drive}/{rw}): {ex.Message}");
             return null;
         }
     }
 
     // ===== Network =====
+    /// <summary>读取所有活跃网络接口的字节计数。upload=true 返回已发送，false 返回已接收。</summary>
+    private static long ReadNetBytes(bool upload)
+    {
+        long total = 0;
+        foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (ni.OperationalStatus == OperationalStatus.Up)
+            {
+                var stats = ni.GetIPStatistics();
+                total += upload ? stats.BytesSent : stats.BytesReceived;
+            }
+        }
+        return total;
+    }
+
     private double ReadNetDown(DateTime now)
     {
         try
         {
-            long total = 0;
-            foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
-            {
-                if (ni.OperationalStatus == OperationalStatus.Up)
-                    total += ni.GetIPStatistics().BytesReceived;
-            }
-            double speed = CalcSpeed(ref _prevNetDown, total, ref _prevNetTime, now);
+            long current = ReadNetBytes(false);
+            double speed = CalcSpeed(ref _prevNetDown, current, ref _prevNetDownTime, now);
             return speed;
         }
-        catch { return 0; }
+        catch (Exception ex) { Debug.WriteLine($"[SysMon] ReadNetDown: {ex.Message}"); return 0; }
     }
 
     private double ReadNetUp(DateTime now)
     {
         try
         {
-            long total = 0;
-            foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
-            {
-                if (ni.OperationalStatus == OperationalStatus.Up)
-                    total += ni.GetIPStatistics().BytesSent;
-            }
-            double speed = CalcSpeed(ref _prevNetUp, total, ref _prevNetTime, now);
+            long current = ReadNetBytes(true);
+            double speed = CalcSpeed(ref _prevNetUp, current, ref _prevNetUpTime, now);
             return speed;
         }
-        catch { return 0; }
+        catch (Exception ex) { Debug.WriteLine($"[SysMon] ReadNetUp: {ex.Message}"); return 0; }
     }
 
     private static double CalcSpeed(ref long prevBytes, long currentBytes, ref DateTime prevTime, DateTime now)
@@ -318,131 +363,87 @@ public class SystemInfoService
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
+            Debug.WriteLine($"[SysMon] ReadBattery: {ex.Message}");
             snapshot.BatteryPercent = -1;
             snapshot.BatteryStatus = "unknown";
         }
     }
 
     // ============================================================
-    // 传感器回退链: LHM (PawnIO) → AMD ADL → HWiNFO → None
+    // 传感器采集 — 委托给 CpuSensorReader / GpuSensorReader
+    // CPU: PawnIO MSR(Intel) / PawnIO SMU(AMD) → ADL(AMD) → LHM → HWiNFO
+    // GPU: NVAPI(NVIDIA) / ADL(AMD) / IGCL(Intel) → LHM → HWiNFO
     // ============================================================
 
-    /// <summary>
-    /// 按优先级尝试各传感器后端，设置 CPU/GPU 温度和后端状态。
-    /// Tier 1: LHM (PawnIO) — 全功能
-    /// Tier 2: AMD ADL (atiadlxx.dll) — 仅 CPU 温度，用户态
-    /// Tier 3: HWiNFO 共享内存 — CPU + GPU 温度，需 HWiNFO 运行
-    /// Tier 4: 不可用
-    /// </summary>
     private static void TryReadSensors(ref SystemSnapshot snapshot)
     {
-        // Tier 1: LHM (PawnIO) — 最优先
-        if (LhmSensorService.Instance.IsAvailable)
+        try
         {
-            ReadFromLhm(ref snapshot);
-            snapshot.Backend = SensorBackend.Lhm;
-            snapshot.BackendNote = LhmSensorService.Instance.LastError ?? ""; // null when healthy
-            return;
-        }
+            var cpuResult = CpuSensorReader.Read();
+            var gpuResults = GpuSensorReader.ReadAll();
 
-        // LHM 不可用，记录原因
-        string lhmError = LhmSensorService.Instance.LastError ?? "PawnIO 驱动未安装";
-
-        // Tier 2: AMD ADL (atiadlxx.dll, 用户态, 免 admin)
-        int adlTemp = AmdTempReader.Instance.ReadCpuTemp();
-        if (adlTemp > 0)
-        {
-            snapshot.CpuTemperature = adlTemp;
-            snapshot.Backend = SensorBackend.AmdAdl;
-            snapshot.BackendNote = $"ADL 回退 (LHM 不可用: {lhmError})";
-            // GPU 无法从 ADL 获取
-            snapshot.Gpu = new GpuInfo { UsagePercent = -1, Temperature = -1 };
-            return;
-        }
-
-        // Tier 3: HWiNFO 共享内存
-        int hwCpuTemp = AmdTempReader.Instance.ReadCpuTempViaHwInfoOnly();
-        if (hwCpuTemp > 0)
-        {
-            snapshot.CpuTemperature = hwCpuTemp;
-            snapshot.Backend = SensorBackend.HwInfo;
-            snapshot.BackendNote = $"HWiNFO 回退 (LHM: {lhmError}, ADL: 不可用)";
-            // GPU 也可能从 HWiNFO 获取
-            int hwGpuTemp = AmdTempReader.Instance.ReadGpuTempViaHwInfo();
-            snapshot.Gpu = new GpuInfo
+            snapshot.CpuTemperature = cpuResult.Temperature;
+            snapshot.Backend = cpuResult.Source switch
             {
-                Name = hwGpuTemp > 0 ? "HWiNFO GPU" : "",
-                UsagePercent = -1,
-                Temperature = hwGpuTemp > 0 ? hwGpuTemp : -1,
+                "PawnIO_MSR" => SensorBackend.PawnMsr,
+                "PawnIO_SMU" => SensorBackend.PawnSmu,
+                "Broker_SMU" or "Broker_MSR" => SensorBackend.Lhm,
+                "LHM_HTTP" => SensorBackend.Lhm,
+                "ThermalZone" => SensorBackend.Lhm,
+                string s when s.StartsWith("ADL") => SensorBackend.AmdAdl,
+                "LHM" => SensorBackend.Lhm,
+                string s when s.StartsWith("HWiNFO") => SensorBackend.HwInfo,
+                _ => SensorBackend.None,
             };
-            return;
-        }
 
-        // Tier 4: 全部不可用
-        snapshot.CpuTemperature = -1;
-        snapshot.Backend = SensorBackend.None;
-        snapshot.BackendNote = $"无可用传感器后端 — LHM: {lhmError}, ADL: 不可用, HWiNFO: 未运行";
-        snapshot.Gpu = new GpuInfo { UsagePercent = -1, Temperature = -1 };
-    }
-
-    // ---- Tier 1: LHM 完整读取 ----
-
-    private static void ReadFromLhm(ref SystemSnapshot snapshot)
-    {
-        var svc = LhmSensorService.Instance;
-
-        // CPU 温度：取 CPU Package 或第一个 CPU 温度
-        if (svc.Catalog.TryGetValue(SensorCategory.CpuTemp, out var cpuTemps) && cpuTemps.Count > 0)
-        {
-            var pkg = cpuTemps.FirstOrDefault(r =>
-                r.SensorName?.Contains("Package", StringComparison.OrdinalIgnoreCase) == true ||
-                r.SensorName?.Contains("Tctl", StringComparison.OrdinalIgnoreCase) == true ||
-                r.SensorName?.Contains("Tdie", StringComparison.OrdinalIgnoreCase) == true);
-            if (pkg.SensorName != null && pkg.Value > 0)
-                snapshot.CpuTemperature = pkg.Value;
+            // 构建多 GPU 数组
+            if (gpuResults.Count > 0)
+            {
+                snapshot.Gpus = gpuResults.Select(r => new GpuInfo
+                {
+                    Name = r.Name,
+                    UsagePercent = r.UsagePercent,
+                    Temperature = r.Temperature,
+                    MemoryUsedMB = r.MemoryUsedMB,
+                    MemoryTotalMB = r.MemoryTotalMB,
+                }).ToArray();
+                // 主 GPU：优先有 3D 负载的，否则温度最高的
+                var primary = gpuResults
+                    .OrderByDescending(g => g.UsagePercent > 0 ? 1 : 0)
+                    .ThenByDescending(g => g.Temperature)
+                    .First();
+                snapshot.Gpu = new GpuInfo
+                {
+                    Name = primary.Name,
+                    UsagePercent = primary.UsagePercent,
+                    Temperature = primary.Temperature,
+                    MemoryUsedMB = primary.MemoryUsedMB,
+                    MemoryTotalMB = primary.MemoryTotalMB,
+                };
+            }
             else
-                snapshot.CpuTemperature = cpuTemps.FirstOrDefault(r => r.Value > 0).Value > 0
-                    ? cpuTemps.First(r => r.Value > 0).Value : -1;
+            {
+                snapshot.Gpus = [];
+                snapshot.Gpu = new GpuInfo { UsagePercent = -1, Temperature = -1 };
+            }
+
+            // 后端描述
+            string gpuSource = gpuResults.Count > 0 ? gpuResults[0].Source : "无";
+            snapshot.BackendNote = cpuResult.Source == gpuSource
+                ? (cpuResult.Source == "无" ? "CPU 和 GPU 均无可用数据源" : $"数据源: {cpuResult.Source}")
+                : $"CPU: {cpuResult.Source}, GPU: {gpuSource}" +
+                  (snapshot.Gpus.Length > 1 ? $" ({snapshot.Gpus.Length} 张卡)" : "");
         }
-
-        // GPU 完整信息
-        var gpuName = svc.AllReadings
-            .Where(r => r.Category is SensorCategory.GpuTemp or SensorCategory.GpuLoad)
-            .Select(r => r.HardwareName)
-            .FirstOrDefault();
-
-        if (string.IsNullOrEmpty(gpuName))
+        catch (Exception ex)
         {
+            Debug.WriteLine($"[SysMon] TryReadSensors 异常: {ex.GetType().Name}: {ex.Message}");
+            snapshot.CpuTemperature = -1;
+            snapshot.Backend = SensorBackend.None;
+            snapshot.BackendNote = $"传感器采集异常: {ex.Message}";
             snapshot.Gpu = new GpuInfo { UsagePercent = -1, Temperature = -1 };
-            return;
+            snapshot.Gpus = [];
         }
-
-        var gpu = new GpuInfo { Name = gpuName, UsagePercent = -1, Temperature = -1 };
-
-        if (svc.Catalog.TryGetValue(SensorCategory.GpuTemp, out var gpuTemps) && gpuTemps.Count > 0)
-        {
-            var core = gpuTemps.FirstOrDefault(r => r.SensorName?.Contains("Core", StringComparison.OrdinalIgnoreCase) == true);
-            gpu.Temperature = core.SensorName != null && core.Value > 0 ? core.Value
-                : gpuTemps.FirstOrDefault(r => r.Value > 0).Value > 0 ? gpuTemps.First(r => r.Value > 0).Value : -1;
-        }
-
-        if (svc.Catalog.TryGetValue(SensorCategory.GpuLoad, out var gpuLoads) && gpuLoads.Count > 0)
-        {
-            var core = gpuLoads.FirstOrDefault(r => r.SensorName?.Contains("Core", StringComparison.OrdinalIgnoreCase) == true);
-            gpu.UsagePercent = core.SensorName != null && core.Value >= 0 ? core.Value
-                : gpuLoads.FirstOrDefault(r => r.Value >= 0).SensorName != null ? gpuLoads.First(r => r.Value >= 0).Value : -1;
-        }
-
-        if (svc.Catalog.TryGetValue(SensorCategory.GpuMemory, out var gpuMem) && gpuMem.Count > 0)
-        {
-            var used = gpuMem.FirstOrDefault(r => r.SensorName?.Contains("Used", StringComparison.OrdinalIgnoreCase) == true);
-            var total = gpuMem.FirstOrDefault(r => r.SensorName?.Contains("Total", StringComparison.OrdinalIgnoreCase) == true);
-            if (used.SensorName != null) gpu.MemoryUsedMB = used.Value;
-            if (total.SensorName != null) gpu.MemoryTotalMB = total.Value;
-        }
-
-        snapshot.Gpu = gpu;
     }
 }

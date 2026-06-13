@@ -65,12 +65,17 @@ internal sealed partial class SysMonMainPage : ListPage
             },
             new ListItem(new GpuDetailPage())
             {
-                Title = !string.IsNullOrEmpty(info.Gpu.Name)
-                    ? $"GPU — {info.Gpu.Name}"
+                Title = info.Gpus.Length > 0
+                    ? (info.Gpus.Length == 1
+                        ? $"GPU — {info.Gpus[0].Name}"
+                        : $"GPU — {info.Gpus.Length} 张显卡")
                     : "GPU — 不可用",
-                Subtitle = info.CpuTemperature >= 0
-                    ? $"CPU {info.CpuTemperature:F0}°C | GPU {(info.Gpu.Temperature >= 0 ? $"{info.Gpu.Temperature:F0}°C" : "N/A")}"
-                    : $"传感器后端: {BackendStatusText(info.Backend)}",
+                Subtitle = info.Gpus.Length > 0
+                    ? string.Join(" | ", info.Gpus.Select(g =>
+                        $"{g.Name}: {DockFormat.Temp(g.Temperature)}"))
+                    : (info.CpuTemperature >= 0
+                        ? $"传感器后端: {BackendStatusText(info.Backend)}"
+                        : ""),
                 Icon = new IconInfo(""),
             },
             // btop4win 启动器

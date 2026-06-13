@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <RootNamespace>SysMonBroker</RootNamespace>
+    <AssemblyName>SysMonBroker</AssemblyName>
+    <Version>1.1.0.0</Version>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>link</TrimMode>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <!-- PawnIO ring0 modules -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\SysMonCmdPal\Pawn\IntelMSR.bin" Link="IntelMSR.bin" />
+    <EmbeddedResource Include="..\SysMonCmdPal\Pawn\RyzenSMU.bin" Link="RyzenSMU.bin" />
+  </ItemGroup>
+
+</Project>

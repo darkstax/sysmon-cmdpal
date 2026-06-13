@@ -23,6 +23,7 @@ public sealed class LhmSensorService
 
     private Computer? _computer;
     private bool _available;
+    private bool _initAttempted;  // 是否已尝试初始化（惰性，避免构造时卡死）
     private int _consecutiveFailures;
     private const int MaxFailuresBeforeUnavailable = 3;
     private readonly object _lock = new();
@@ -97,27 +98,58 @@ public sealed class LhmSensorService
 
     private LhmSensorService()
     {
-        // 加载配置（即使 LHM 失败也保留，不丢失用户配置）
         try { Config = LoadConfig(); }
         catch (Exception ex)
         {
             Config = new();
             LastError = $"配置加载失败: {ex.Message}";
         }
+    }
 
-        // 初始化 LHM（可能因 PawnIO 未安装/驱动异常而失败）
-        InitLhm();
-        if (_available)
+    /// <summary>上次尝试初始化的时间，用于冷却重试</summary>
+    private DateTime _lastInitAttempt = DateTime.MinValue;
+    private static readonly TimeSpan InitRetryCooldown = TimeSpan.FromSeconds(30);
+
+    public bool IsAvailable
+    {
+        get
         {
-            Refresh();
-            LastError = null;
+            lock (_lock)
+            {
+                if (!_initAttempted)
+                {
+                    _initAttempted = true;
+                    _lastInitAttempt = DateTime.UtcNow;
+                    InitLhm();
+                    if (_available) Refresh(); // 填充 Catalog/AllReadings
+                }
+                else if (!_available && DateTime.UtcNow - _lastInitAttempt > InitRetryCooldown)
+                {
+                    // 冷却重试：HWiNFO 用户可能稍后启动，或 PawnIO 驱动可能被安装
+                    _lastInitAttempt = DateTime.UtcNow;
+                    _consecutiveFailures = 0;
+                    InitLhm();
+                    if (_available)
+                    {
+                        try { Refresh(); }
+                        catch (Exception ex) { _available = false; Debug.WriteLine($"[SysMon] LHM retry refresh failed: {ex.Message}"); }
+                    }
+                }
+                return _available;
+            }
         }
     }
 
     private void InitLhm()
     {
+        var logPath = System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "SysMonCmdPal", "lhm_init.log");
         try
         {
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(logPath)!);
+            System.IO.File.AppendAllText(logPath, $"{DateTime.Now:O} [INIT] Starting LibreHardwareMonitor...\n");
+
             _computer = new Computer
             {
                 IsCpuEnabled = true,
@@ -128,34 +160,45 @@ public sealed class LhmSensorService
                 IsNetworkEnabled = false,
                 IsStorageEnabled = true,
             };
+            System.IO.File.AppendAllText(logPath, $"{DateTime.Now:O} [INIT] Computer created, calling Open()...\n");
+
             _computer.Open();
+
+            System.IO.File.AppendAllText(logPath, $"{DateTime.Now:O} [INIT] Open() OK. Hardware count: {_computer.Hardware.Count}\n");
+            foreach (var hw in _computer.Hardware)
+                System.IO.File.AppendAllText(logPath, $"  {hw.HardwareType}: {hw.Name} (sensors: {hw.Sensors.Count()})\n");
+
             _available = true;
             _consecutiveFailures = 0;
         }
         catch (Exception ex)
         {
+            System.IO.File.AppendAllText(logPath, $"{DateTime.Now:O} [FAIL] {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}\n");
             Debug.WriteLine($"[SysMon] LHM init failed: {ex.Message}");
             _available = false;
             _computer = null;
-            _consecutiveFailures = MaxFailuresBeforeUnavailable; // 初始化失败直接计满
-            LastError = $"LHM 初始化失败（PawnIO 驱动可能未安装）: {ex.Message}";
+            _consecutiveFailures = MaxFailuresBeforeUnavailable;
+            LastError = $"LHM 初始化失败: {ex.Message}";
         }
     }
 
     /// <summary>尝试重新初始化 LHM（用户修复 PawnIO 后调用）</summary>
     public bool TryReconnect()
     {
-        Shutdown();
-        _consecutiveFailures = 0;
-        InitLhm();
-        if (_available)
+        lock (_lock)
         {
-            try { Refresh(); } catch { _available = false; }
+            Shutdown();
+            _consecutiveFailures = 0;
+            InitLhm();
+            if (_available)
+            {
+                try { Refresh(); }
+                catch (Exception ex) { _available = false; Debug.WriteLine($"[SysMon] LHM TryReconnect refresh failed: {ex.Message}"); }
+            }
+            return _available;
         }
-        return _available;
     }
 
-    public bool IsAvailable => _available;
 
     /// <summary>刷新所有传感器读数</summary>
     public void Refresh()
@@ -176,7 +219,7 @@ public sealed class LhmSensorService
 
                     foreach (var s in hw.Sensors)
                     {
-                        if (!s.Value.HasValue) continue;
+                        if (!s.Value.HasValue || double.IsNaN((double)s.Value) || double.IsInfinity((double)s.Value)) continue;
 
                         var label = s.SensorType.ToString();
                         var unit = ToUnit(label);
@@ -204,10 +247,10 @@ public sealed class LhmSensorService
                             WarningThreshold = cfgEntry?.WarningThreshold ?? 0,
                             CriticalThreshold = cfgEntry?.CriticalThreshold ?? 0,
                         });
-
-                        // Also collect sub-hardware sensors
-                        CollectSubHardware(hw, hwName, allReadings);
                     }
+
+                    // Collect sub-hardware sensors ONCE per hardware (was inside the sensor loop, causing N× duplicates)
+                    CollectSubHardware(hw, hwName, allReadings);
                 }
 
                 AllReadings = allReadings;
@@ -238,7 +281,7 @@ public sealed class LhmSensorService
         {
             foreach (var s in sub.Sensors)
             {
-                if (!s.Value.HasValue) continue;
+                if (!s.Value.HasValue || double.IsNaN((double)s.Value) || double.IsInfinity((double)s.Value)) continue;
                 var label = s.SensorType.ToString();
                 var key = $"{hw.HardwareType}|{hwName}|{s.Name}|{label}";
 
@@ -274,7 +317,10 @@ public sealed class LhmSensorService
                 return JsonSerializer.Deserialize<SensorConfig>(json) ?? new();
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[SysMon] Sensor config load failed: {ex.Message}");
+        }
         return new();
     }
 
@@ -287,7 +333,10 @@ public sealed class LhmSensorService
             var json = JsonSerializer.Serialize(Config, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(ConfigPath, json);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[SysMon] Sensor config save failed: {ex.Message}");
+        }
     }
 
     public void AddSensorToConfig(SensorReading reading)

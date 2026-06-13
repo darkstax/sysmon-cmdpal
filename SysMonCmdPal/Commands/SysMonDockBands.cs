@@ -28,6 +28,7 @@ internal static class DockBandRefreshCoordinator
     private static readonly object _lock = new();
     private static System.Timers.Timer? _timer;
     private static int _refCount;
+    private static int _isRefreshing; // 0=idle, 1=refreshing (Interlocked flag, 防并发)
 
     public static void Subscribe(Action refresh)
     {
@@ -37,10 +38,10 @@ internal static class DockBandRefreshCoordinator
             _refCount++;
             if (_timer == null)
             {
-                SystemInfoService.Instance.Refresh();
                 _timer = new System.Timers.Timer(1000) { AutoReset = true };
                 _timer.Elapsed += OnTick;
                 _timer.Start();
+                // Defer first refresh to timer tick — don't block COM server startup
             }
         }
     }
@@ -77,12 +78,24 @@ internal static class DockBandRefreshCoordinator
 
     private static void OnTick(object? sender, ElapsedEventArgs e)
     {
-        SystemInfoService.Instance.Refresh();
-        Action[] snapshot;
-        lock (_lock) { snapshot = _subscribers.ToArray(); }
-        foreach (var action in snapshot)
+        // 防并发：如果上一次 tick 仍在执行，跳过本次
+        if (Interlocked.Exchange(ref _isRefreshing, 1) != 0)
+            return;
+
+        try
         {
-            try { action(); } catch { }
+            SystemInfoService.Instance.Refresh();
+            Action[] snapshot;
+            lock (_lock) { snapshot = _subscribers.ToArray(); }
+            foreach (var action in snapshot)
+            {
+                try { action(); }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[SysMon] DockBand refresh subscriber: {ex.Message}"); }
+            }
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _isRefreshing, 0);
         }
     }
 }
@@ -332,7 +345,7 @@ internal sealed partial class SensorDockBand : WrappedDockItem
     private readonly string _sensorKey;
 
     public SensorDockBand(string sensorKey, string displayName)
-        : base(Array.Empty<IListItem>(), $"sysmon.dock.sensor.{sensorKey.GetHashCode():X8}", displayName)
+        : base(Array.Empty<IListItem>(), $"sysmon.dock.sensor.{SanitizeId(sensorKey)}", displayName)
     {
         _sensorKey = sensorKey;
         _item = new ListItem(new NoOpCommand())
@@ -374,6 +387,15 @@ internal sealed partial class SensorDockBand : WrappedDockItem
     }
 
     public string SensorKey => _sensorKey;
+
+    /// <summary>将传感器键转为安全的 Dock ID 后缀（避免 GetHashCode 碰撞和跨运行不稳定）</summary>
+    private static string SanitizeId(string key)
+    {
+        var sb = new System.Text.StringBuilder(key.Length);
+        foreach (var c in key)
+            sb.Append(char.IsLetterOrDigit(c) || c == '.' ? c : '_');
+        return sb.ToString();
+    }
 }
 
 /// <summary>Dock band: GPU usage, temperature. Links to GpuDetailPage.</summary>
@@ -397,18 +419,24 @@ internal sealed partial class GpuDockBand : WrappedDockItem
     private void OnRefresh()
     {
         var info = SystemInfoService.Instance.Current;
-        if (string.IsNullOrEmpty(info.Gpu.Name))
+        var gpus = info.Gpus;
+        if (gpus == null || gpus.Length == 0)
         {
             _gpuItem.Title = "GPU — 不可用";
             _gpuItem.Subtitle = "LHM 未加载";
             return;
         }
 
-        var gpu = info.Gpu;
-        var temp = DockFormat.Temp(gpu.Temperature);
+        // 选择主 GPU（优先有 3D 负载的）
+        var primary = gpus.OrderByDescending(g => g.UsagePercent > 0 ? 1 : 0)
+                          .ThenByDescending(g => g.Temperature)
+                          .First();
+        var temp = DockFormat.Temp(primary.Temperature);
         _gpuItem.Title = temp.Length > 0
-            ? $"GPU {gpu.UsagePercent:F0}%  {temp}"
-            : $"GPU {DockFormat.Percent(gpu.UsagePercent)}";
-        _gpuItem.Subtitle = gpu.Name;
+            ? $"GPU {primary.UsagePercent:F0}%  {temp}"
+            : $"GPU {DockFormat.Percent(primary.UsagePercent)}";
+        _gpuItem.Subtitle = gpus.Length > 1
+            ? $"{primary.Name} (+{gpus.Length - 1})"
+            : primary.Name;
     }
 }
