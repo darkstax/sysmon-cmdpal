@@ -24,8 +24,8 @@ public partial class SysMonCommandsProvider : CommandProvider
 
     private readonly ICommandItem _rootCommand;
 
-    // 高精度模式设置（兼容旧版）
-    private readonly ToggleSetting _highPrecisionToggle;
+    // 高精度模式（v3: 下拉选择无/HWiNFO/Broker）
+    private readonly ChoiceSetSetting _precisionModeSetting;
     // 传感器链设置
     private readonly ChoiceSetSetting _cpuPrimarySource;
     private readonly ChoiceSetSetting _cpuSecondarySource;
@@ -42,6 +42,14 @@ public partial class SysMonCommandsProvider : CommandProvider
         new("Broker (高精度)", "Broker"),
         new("ThermalZone (ACPI)", "ThermalZone"),
         new("HWiNFO (回退)", "HWiNFO"),
+    ];
+
+    // 高精度模式选项
+    private static readonly List<ChoiceSetSetting.Choice> PrecisionChoices =
+    [
+        new("无 (仅 ACPI)", "None"),
+        new("HWiNFO (精确, 无需驱动)", "HWiNFO"),
+        new("Broker (最精准, 需 PawnIO)", "Broker"),
     ];
 
     // GPU 模式选项
@@ -62,12 +70,13 @@ public partial class SysMonCommandsProvider : CommandProvider
         // 从文件加载完整配置
         var savedConfig = SensorChainConfig.Load();
 
-        // 高精度模式设置（兼容旧版）
-        _highPrecisionToggle = new ToggleSetting(
-            "highPrecision",
-            "高精度温度模式",
-            "启用后通过管理员 Broker 进程读取精准 CPU 温度 (Tctl/Tdie)。\n需要预先安装 PawnIO 驱动（例如通过 G-Helper 安装）。",
-            savedConfig.HighPrecision);
+        // 高精度模式（v3: 下拉选择 无/HWiNFO/Broker）
+        _precisionModeSetting = new ChoiceSetSetting(
+            "precisionMode",
+            "高精度温度源",
+            "选择最高精度的 CPU 温度数据源。\nBroker 需要 PawnIO 驱动；HWiNFO 无需额外驱动。",
+            PrecisionChoices)
+        { Value = savedConfig.PrecisionModeStr, IgnoreUnknownValue = true };
 
         // CPU 传感器链
         string cpu1 = savedConfig.CpuChain.Count > 0 ? savedConfig.CpuChain[0] : "Broker";
@@ -96,7 +105,7 @@ public partial class SysMonCommandsProvider : CommandProvider
             { Value = savedConfig.GpuModeStr, IgnoreUnknownValue = true };
 
         _settingsObj = new Settings();
-        _settingsObj.Add(_highPrecisionToggle);
+        _settingsObj.Add(_precisionModeSetting);
         _settingsObj.Add(_cpuPrimarySource);
         _settingsObj.Add(_cpuSecondarySource);
         _settingsObj.Add(_cpuTertiarySource);
@@ -107,8 +116,9 @@ public partial class SysMonCommandsProvider : CommandProvider
         _settingsObj.SettingsChanged += OnSettingsChanged;
         Settings = _settingsObj;
 
-        // If high precision was saved as ON, check broker on startup
-        if (savedConfig.HighPrecision)
+        // 根据高精度模式决定 Broker 安装/卸载
+        var precisionMode = _precisionModeSetting.Value ?? "None";
+        if (precisionMode == "Broker")
         {
             _ = EnsureBrokerOnStartupAsync();
         }
@@ -171,7 +181,7 @@ public partial class SysMonCommandsProvider : CommandProvider
         // 从 UI 设置收集当前值
         var config = new SensorChainConfig
         {
-            HighPrecision = _highPrecisionToggle.Value,
+            PrecisionModeStr = _precisionModeSetting.Value ?? "Broker",
             CpuChain =
             [
                 _cpuPrimarySource.Value ?? "Broker",
@@ -191,15 +201,19 @@ public partial class SysMonCommandsProvider : CommandProvider
         SensorLogger.ForceLog($"[Settings] 已保存: CPU链=[{string.Join(", ", config.CpuChain)}], " +
             $"GPU链=[{string.Join(", ", config.GpuChain)}], GPU模式={config.GpuModeStr}");
 
-        // 同步旧版 highPrecision 标记: 如果 CpuChain 包含 Broker 则视为高精度模式
-        if (config.HighPrecision)
+        // 根据高精度模式决定 Broker 安装/卸载
+        if (config.PrecisionMode == PrecisionMode.Broker)
         {
-            // 异步触发 Broker 安装（UAC 弹窗）
             _ = SetupBrokerAsync();
+        }
+        else if (config.PrecisionMode == PrecisionMode.HWiNFO)
+        {
+            // HWiNFO 模式: 卸载 Broker（如果已安装），用户选 HWiNFO 则不需要 Broker
+            _ = UninstallBrokerAsync();
         }
         else
         {
-            // 异步触发 Broker 卸载
+            // None 模式: 卸载 Broker
             _ = UninstallBrokerAsync();
         }
     }

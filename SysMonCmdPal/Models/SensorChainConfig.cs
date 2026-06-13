@@ -13,12 +13,20 @@ namespace SysMonCmdPal;
 /// <summary>GPU 模式</summary>
 public enum GpuMode
 {
-    /// <summary>智能筛选: 部分卡有 3D 活动则只显示活动的（默认）</summary>
     Auto,
-    /// <summary>仅显示独立显卡（不显示集显）</summary>
     DedicatedOnly,
-    /// <summary>显示所有检测到的 GPU</summary>
     All,
+}
+
+/// <summary>高精度模式 — 决定最高精度的数据源</summary>
+public enum PrecisionMode
+{
+    /// <summary>不使用高精度源，仅 ACPI ThermalZone</summary>
+    None,
+    /// <summary>使用 HWiNFO 共享内存（无需 PawnIO 驱动）</summary>
+    HWiNFO,
+    /// <summary>使用 Broker（PawnIO 驱动，最精准的 Tctl/Tdie）</summary>
+    Broker,
 }
 
 /// <summary>
@@ -28,13 +36,33 @@ public enum GpuMode
 public sealed class SensorChainConfig
 {
     /// <summary>配置版本号</summary>
-    public string Version { get; set; } = "2";
+    public string Version { get; set; } = "3";
 
-    /// <summary>高精度模式（旧版兼容字段，等价于 CpuChain 包含 "Broker"）</summary>
-    public bool HighPrecision { get; set; } = true;
+    /// <summary>高精度模式（v3: "None" / "HWiNFO" / "Broker"，向后兼容 v1/v2 bool）</summary>
+    public string PrecisionModeStr { get; set; } = "Broker";
+
+    [JsonIgnore]
+    public PrecisionMode PrecisionMode
+    {
+        get => Enum.TryParse<PrecisionMode>(PrecisionModeStr, true, out var m) ? m : PrecisionMode.Broker;
+        set => PrecisionModeStr = value.ToString();
+    }
+
+    /// <summary>旧版兼容: HighPrecision = PrecisionMode == Broker</summary>
+    [JsonIgnore]
+    public bool HighPrecision => PrecisionMode == PrecisionMode.Broker;
 
     /// <summary>CPU 传感器链（优先级从高到低）</summary>
     public List<string> CpuChain { get; set; } = ["Broker", "ThermalZone", "HWiNFO"];
+
+    /// <summary>根据 PrecisionMode 获取自动推荐的 CPU 链</summary>
+    [JsonIgnore]
+    public List<string> DefaultCpuChain => PrecisionMode switch
+    {
+        PrecisionMode.Broker => (List<string>)["Broker", "ThermalZone", "HWiNFO"],
+        PrecisionMode.HWiNFO => (List<string>)["HWiNFO", "ThermalZone", "Broker"],
+        _ => (List<string>)["ThermalZone", "HWiNFO"],
+    };
 
     /// <summary>GPU 传感器链（优先级从高到低）</summary>
     public List<string> GpuChain { get; set; } = ["Broker", "ThermalZone", "HWiNFO"];
@@ -66,25 +94,32 @@ public sealed class SensorChainConfig
                 var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
 
-                // 检测版本: 如果是 v2 格式（有 cpuChain 字段），直接反序列化
-                if (root.TryGetProperty("cpuChain", out _) ||
-                    root.TryGetProperty("version", out var verEl) && verEl.GetString() == "2")
+                // 检测版本: v3+ 有 precisionMode 字段
+                if (root.TryGetProperty("precisionMode", out var pm))
                 {
                     return JsonSerializer.Deserialize<SensorChainConfig>(json, _jsonOptions) ?? new();
                 }
-
-                // 向后兼容 v1: 只有 highPrecision 字段
-                var config = new SensorChainConfig();
+                // v2: 有 cpuChain / version=="2"
+                if (root.TryGetProperty("cpuChain", out _) ||
+                    root.TryGetProperty("version", out var verEl) && verEl.GetString() == "2")
+                {
+                    var config = JsonSerializer.Deserialize<SensorChainConfig>(json, _jsonOptions) ?? new();
+                    // 从旧版 highPrecision bool 迁移到 PrecisionMode
+                    if (!config.HighPrecision)
+                        config.PrecisionModeStr = "None";
+                    config.Version = "3";
+                    return config;
+                }
+                // v1: 只有 highPrecision 字段
+                var config2 = new SensorChainConfig();
                 if (root.TryGetProperty("highPrecision", out var hp))
                 {
-                    config.HighPrecision = hp.GetBoolean();
+                    config2.PrecisionModeStr = hp.GetBoolean() ? "Broker" : "None";
+                    config2.CpuChain = hp.GetBoolean()
+                        ? (List<string>)["Broker", "ThermalZone", "HWiNFO"]
+                        : (List<string>)["ThermalZone", "HWiNFO"];
                 }
-                // 如果高精度关闭，CpuChain 默认跳过 Broker
-                if (!config.HighPrecision)
-                {
-                    config.CpuChain = ["ThermalZone", "HWiNFO"];
-                }
-                return config;
+                return config2;
             }
         }
         catch (Exception ex)
