@@ -9,7 +9,7 @@ namespace SysMonCmdPal;
 
 internal static class SensorLogger
 {
-    private static readonly string LogPath = Path.Combine(
+    private static string LogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "SysMonCmdPal", "sensor_backend.log");
 

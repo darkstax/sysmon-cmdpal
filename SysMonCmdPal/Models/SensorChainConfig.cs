@@ -79,7 +79,7 @@ public sealed class SensorChainConfig
     }
 
     /// <summary>配置文件路径</summary>
-    public static readonly string ConfigPath = Path.Combine(
+    public static string ConfigPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "SysMonCmdPal", "settings.json");
 
@@ -94,18 +94,30 @@ public sealed class SensorChainConfig
                 var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
 
-                // 检测版本: v3+ 有 precisionMode 字段
-                if (root.TryGetProperty("precisionMode", out var pm))
+                // v3+ 有 precisionModeStr 字段（camelCase naming policy）
+                if (root.TryGetProperty("precisionModeStr", out _))
                 {
                     return JsonSerializer.Deserialize<SensorChainConfig>(json, _jsonOptions) ?? new();
+                }
+                // v3+ legacy: precisionMode (old key) + version "3"
+                if (root.TryGetProperty("precisionMode", out var pm3) &&
+                    root.TryGetProperty("version", out var verCheck) && verCheck.GetString() == "3")
+                {
+                    var cfg3 = JsonSerializer.Deserialize<SensorChainConfig>(json, _jsonOptions) ?? new();
+                    cfg3.PrecisionModeStr = pm3.GetString() ?? "Broker";
+                    cfg3.Version = "3";
+                    return cfg3;
                 }
                 // v2: 有 cpuChain / version=="2"
                 if (root.TryGetProperty("cpuChain", out _) ||
                     root.TryGetProperty("version", out var verEl) && verEl.GetString() == "2")
                 {
                     var config = JsonSerializer.Deserialize<SensorChainConfig>(json, _jsonOptions) ?? new();
+                    // 从旧版 precisionMode 键迁移（v2 序列化为 precisionMode 而非 precisionModeStr）
+                    if (root.TryGetProperty("precisionMode", out var pm))
+                        config.PrecisionModeStr = pm.GetString() ?? "Broker";
                     // 从旧版 highPrecision bool 迁移到 PrecisionMode
-                    if (!config.HighPrecision)
+                    else if (!config.HighPrecision)
                         config.PrecisionModeStr = "None";
                     config.Version = "3";
                     return config;
