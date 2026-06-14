@@ -26,8 +26,7 @@ public enum PrecisionMode
     None,
     /// <summary>使用 HWiNFO 共享内存（推荐，精度与驱动级读取相当）</summary>
     HWiNFO,
-    /// <summary>[已废弃] 使用 Broker（商店版已移除，向后兼容旧配置）</summary>
-    [Obsolete("商店版已移除 Broker。此值仅用于旧配置迁移，自动降级为 HWiNFO。")]
+    /// <summary>使用 Broker COM 推送（最精准，需 PawnIO 驱动）</summary>
     Broker,
 }
 
@@ -46,9 +45,7 @@ public sealed class SensorChainConfig
     [JsonIgnore]
     public PrecisionMode PrecisionMode
     {
-        get => Enum.TryParse<PrecisionMode>(PrecisionModeStr, true, out var m)
-            ? (m == PrecisionMode.Broker ? PrecisionMode.HWiNFO : m)
-            : PrecisionMode.HWiNFO;
+        get => Enum.TryParse<PrecisionMode>(PrecisionModeStr, true, out var m) ? m : PrecisionMode.HWiNFO;
         set => PrecisionModeStr = value.ToString();
     }
 
@@ -101,9 +98,7 @@ public sealed class SensorChainConfig
                 if (root.TryGetProperty("precisionModeStr", out _))
                 {
                     var cfg = JsonSerializer.Deserialize<SensorChainConfig>(json, _jsonOptions) ?? new();
-                    // 旧 Broker 配置自动迁移到 HWiNFO
-                    if (cfg.PrecisionModeStr == "Broker")
-                        cfg.PrecisionModeStr = "HWiNFO";
+                    // 移除旧链中的 "Broker" 条目（Broker 通过 COM 推送，不需要链式查询）
                     cfg.CpuChain = MigrateOldChain(cfg.CpuChain);
                     cfg.GpuChain = MigrateOldChain(cfg.GpuChain);
                     cfg.Version = "4";

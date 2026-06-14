@@ -60,6 +60,7 @@ internal sealed partial class GpuDetailPage : ContentPage
 
     private static string BackendLabel(SensorBackend b) => b switch
     {
+        SensorBackend.Broker => "Broker (最精准) ✓",
         SensorBackend.HwInfo => "HWiNFO 共享内存 ✓",
         SensorBackend.Lhm => "LHM 传感器库 ✓",
         SensorBackend.AmdAdl => "AMD ADL",

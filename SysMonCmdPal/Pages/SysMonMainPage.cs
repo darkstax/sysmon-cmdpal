@@ -97,6 +97,7 @@ internal sealed partial class SysMonMainPage : ListPage
 
     private static string BackendStatusText(SensorBackend b) => b switch
     {
+        SensorBackend.Broker => "Broker (最精准) ✓",
         SensorBackend.HwInfo => "HWiNFO ✓",
         SensorBackend.AmdAdl => "ADL 回退 (仅 CPU)",
         SensorBackend.Lhm => "LHM 传感器库",

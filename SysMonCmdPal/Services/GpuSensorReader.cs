@@ -10,6 +10,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using SysMonCmdPal.Broker;
 
 namespace SysMonCmdPal;
 
@@ -29,6 +30,17 @@ internal static class GpuSensorReader
     /// </summary>
     public static List<GpuResult> ReadAll()
     {
+        // 优先使用 Broker COM 推送的数据
+        var brokerSnap = BrokerPushReceiver.Instance.Snapshot;
+        if (brokerSnap.IsFresh && brokerSnap.Gpus.Count > 0)
+        {
+            return brokerSnap.Gpus.Values
+                .Select(g => new GpuResult(g.Name, g.UsagePercent, g.Temperature,
+                    g.MemoryUsedMB, g.MemoryTotalMB, "Broker"))
+                .ToList();
+        }
+
+        // 回退到配置的传感器链
         var config = SensorChainConfig.Load();
 
         foreach (var source in config.GpuChain)

@@ -13,6 +13,7 @@
 
 using System;
 using System.Linq;
+using SysMonCmdPal.Broker;
 
 namespace SysMonCmdPal;
 
@@ -24,9 +25,17 @@ public readonly record struct CpuTempResult(double Temperature, string Source)
 
 internal static class CpuSensorReader
 {
-    /// <summary>读取 CPU 温度，按用户配置的传感器链遍历</summary>
+    /// <summary>读取 CPU 温度，优先检查 Broker COM 推送缓存</summary>
     public static CpuTempResult Read()
     {
+        // 优先使用 Broker COM 推送的数据（最精准）
+        var brokerSnap = BrokerPushReceiver.Instance.Snapshot;
+        if (brokerSnap.IsFresh && brokerSnap.CpuTemperature > 0)
+        {
+            return new CpuTempResult(brokerSnap.CpuTemperature, brokerSnap.CpuSource);
+        }
+
+        // 回退到配置的传感器链
         var config = SensorChainConfig.Load();
 
         foreach (var source in config.CpuChain)

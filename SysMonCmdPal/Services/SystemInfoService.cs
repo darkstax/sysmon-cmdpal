@@ -15,7 +15,9 @@ namespace SysMonCmdPal;
 /// <summary>传感器后端状态 — 表示当前使用哪个数据源</summary>
 public enum SensorBackend
 {
-    /// <summary>HWiNFO 共享内存 (Global\HWiNFO_SENS_SM2) — 最精准</summary>
+    /// <summary>Broker COM 推送（最精准）</summary>
+    Broker,
+    /// <summary>HWiNFO 共享内存 (Global\HWiNFO_SENS_SM2) — 精准</summary>
     HwInfo,
     /// <summary>NVIDIA NVAPI (nvapi64.dll) — 用户态 GPU 数据</summary>
     Nvapi,
@@ -393,6 +395,7 @@ public class SystemInfoService
             snapshot.CpuTemperature = cpuResult.Temperature;
             snapshot.Backend = cpuResult.Source switch
             {
+                string s when s.StartsWith("Broker") => SensorBackend.Broker,
                 string s when s.StartsWith("HWiNFO") => SensorBackend.HwInfo,
                 "ThermalZone" => SensorBackend.ThermalZone,
                 string s when s.StartsWith("ADL") => SensorBackend.AmdAdl,

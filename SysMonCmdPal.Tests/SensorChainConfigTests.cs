@@ -78,10 +78,10 @@ public class SensorChainConfigTests : IDisposable
     }
 
     [Fact]
-    public void PrecisionMode_BrokerMigratesToHWiNFO()
+    public void PrecisionMode_BrokerIsValid()
     {
         var cfg = new SensorChainConfig { PrecisionModeStr = "Broker" };
-        Assert.Equal(PrecisionMode.HWiNFO, cfg.PrecisionMode);
+        Assert.Equal(PrecisionMode.Broker, cfg.PrecisionMode);
     }
 
     [Fact]
@@ -209,7 +209,7 @@ public class SensorChainConfigTests : IDisposable
     }
 
     [Fact]
-    public void Load_V3_BrokerPrecisionMode_MigratesToHWiNFO()
+    public void Load_V3_BrokerPrecisionMode_KeepsBroker()
     {
         File.WriteAllText(_tempPath, """
             {"version":"3","precisionModeStr":"Broker","cpuChain":["Broker","ThermalZone"],"gpuChain":["Broker","ThermalZone"]}
@@ -218,7 +218,8 @@ public class SensorChainConfigTests : IDisposable
         var cfg = SensorChainConfig.Load();
 
         Assert.Equal("4", cfg.Version);
-        Assert.Equal("HWiNFO", cfg.PrecisionModeStr);
+        Assert.Equal("Broker", cfg.PrecisionModeStr);
+        // Chain 中的 Broker 条目被移除（Broker 通过 COM 推送，不在链中）
         Assert.DoesNotContain("Broker", cfg.CpuChain);
         Assert.DoesNotContain("Broker", cfg.GpuChain);
     }

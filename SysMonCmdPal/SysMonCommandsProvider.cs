@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CommandPalette.Extensions;
 using Microsoft.CommandPalette.Extensions.Toolkit;
+using SysMonCmdPal.Broker;
 
 namespace SysMonCmdPal;
 
@@ -33,21 +34,42 @@ public partial class SysMonCommandsProvider : CommandProvider
     private readonly ChoiceSetSetting _gpuModeSetting;
     private readonly Settings _settingsObj;
 
-    // 传感器源选项（商店版，全部用户态）
-    private static readonly List<ChoiceSetSetting.Choice> SourceChoices =
-    [
-        new("HWiNFO (精确, 无需驱动)", "HWiNFO"),
-        new("ThermalZone (ACPI)", "ThermalZone"),
-        new("ADL (AMD 用户态)", "ADL"),
-        new("LHM (传感器库)", "LHM"),
-    ];
+    // 传感器源选项（商店版，全部用户态，Broker 按需显示）
+    private static List<ChoiceSetSetting.Choice> GetSourceChoices()
+    {
+        var choices = new List<ChoiceSetSetting.Choice>
+        {
+            new("HWiNFO (精确, 无需驱动)", "HWiNFO"),
+            new("ThermalZone (ACPI)", "ThermalZone"),
+            new("ADL (AMD 用户态)", "ADL"),
+            new("LHM (传感器库)", "LHM"),
+        };
 
-    // 高精度模式选项
-    private static readonly List<ChoiceSetSetting.Choice> PrecisionChoices =
-    [
-        new("无 (仅 ACPI)", "None"),
-        new("HWiNFO (精确, 无需驱动)", "HWiNFO"),
-    ];
+        // 仅当 Broker 进程运行中时显示 Broker 选项
+        if (BrokerDetector.IsBrokerRunning() || BrokerPushReceiver.Instance.IsBrokerAvailable)
+        {
+            choices.Insert(0, new("Broker (最精准)", "Broker"));
+        }
+
+        return choices;
+    }
+
+    // 高精度模式选项（Broker 按需显示）
+    private static List<ChoiceSetSetting.Choice> GetPrecisionChoices()
+    {
+        var choices = new List<ChoiceSetSetting.Choice>
+        {
+            new("无 (仅 ACPI)", "None"),
+            new("HWiNFO (精确, 无需驱动)", "HWiNFO"),
+        };
+
+        if (BrokerDetector.IsBrokerRunning() || BrokerPushReceiver.Instance.IsBrokerAvailable)
+        {
+            choices.Add(new("Broker (最精准, 需 PawnIO)", "Broker"));
+        }
+
+        return choices;
+    }
 
     // GPU 模式选项
     private static readonly List<ChoiceSetSetting.Choice> GpuModeChoices =
@@ -72,29 +94,29 @@ public partial class SysMonCommandsProvider : CommandProvider
             "precisionMode",
             "高精度温度源",
             "选择最高精度的 CPU 温度数据源。推荐 HWiNFO。",
-            PrecisionChoices)
+            GetPrecisionChoices())
         { Value = savedConfig.PrecisionModeStr, IgnoreUnknownValue = true };
 
         // CPU 传感器链
         string cpu1 = savedConfig.CpuChain.Count > 0 ? savedConfig.CpuChain[0] : "HWiNFO";
         string cpu2 = savedConfig.CpuChain.Count > 1 ? savedConfig.CpuChain[1] : "ADL";
         string cpu3 = savedConfig.CpuChain.Count > 2 ? savedConfig.CpuChain[2] : "ThermalZone";
-        _cpuPrimarySource = new ChoiceSetSetting("cpuPrimary", "CPU 主数据源", "最高优先级的数据源", SourceChoices)
+        _cpuPrimarySource = new ChoiceSetSetting("cpuPrimary", "CPU 主数据源", "最高优先级的数据源", GetSourceChoices())
             { Value = cpu1, IgnoreUnknownValue = true };
-        _cpuSecondarySource = new ChoiceSetSetting("cpuSecondary", "CPU 次级数据源", "主数据源不可用时的回退", SourceChoices)
+        _cpuSecondarySource = new ChoiceSetSetting("cpuSecondary", "CPU 次级数据源", "主数据源不可用时的回退", GetSourceChoices())
             { Value = cpu2, IgnoreUnknownValue = true };
-        _cpuTertiarySource = new ChoiceSetSetting("cpuTertiary", "CPU 三级数据源", "次级数据源不可用时的最终回退", SourceChoices)
+        _cpuTertiarySource = new ChoiceSetSetting("cpuTertiary", "CPU 三级数据源", "次级数据源不可用时的最终回退", GetSourceChoices())
             { Value = cpu3, IgnoreUnknownValue = true };
 
         // GPU 传感器链
         string gpu1 = savedConfig.GpuChain.Count > 0 ? savedConfig.GpuChain[0] : "LHM";
         string gpu2 = savedConfig.GpuChain.Count > 1 ? savedConfig.GpuChain[1] : "ADL";
         string gpu3 = savedConfig.GpuChain.Count > 2 ? savedConfig.GpuChain[2] : "HWiNFO";
-        _gpuPrimarySource = new ChoiceSetSetting("gpuPrimary", "GPU 主数据源", "最高优先级的数据源", SourceChoices)
+        _gpuPrimarySource = new ChoiceSetSetting("gpuPrimary", "GPU 主数据源", "最高优先级的数据源", GetSourceChoices())
             { Value = gpu1, IgnoreUnknownValue = true };
-        _gpuSecondarySource = new ChoiceSetSetting("gpuSecondary", "GPU 次级数据源", "主数据源不可用时的回退", SourceChoices)
+        _gpuSecondarySource = new ChoiceSetSetting("gpuSecondary", "GPU 次级数据源", "主数据源不可用时的回退", GetSourceChoices())
             { Value = gpu2, IgnoreUnknownValue = true };
-        _gpuTertiarySource = new ChoiceSetSetting("gpuTertiary", "GPU 三级数据源", "次级数据源不可用时的最终回退", SourceChoices)
+        _gpuTertiarySource = new ChoiceSetSetting("gpuTertiary", "GPU 三级数据源", "次级数据源不可用时的最终回退", GetSourceChoices())
             { Value = gpu3, IgnoreUnknownValue = true };
 
         // GPU 模式

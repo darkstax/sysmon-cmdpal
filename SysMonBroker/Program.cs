@@ -228,7 +228,56 @@ internal static class Program
                 Log($"Refresh error: {ex.Message}");
             }
 
+            // COM 推送到 Plugin
+            PushToPlugin();
+
             Thread.Sleep(2000);
+        }
+    }
+
+    // ==================== COM Push to Plugin ====================
+
+    private static PushClient? _pushClient;
+    private static bool _pushConnected;
+
+    private static void PushToPlugin()
+    {
+        try
+        {
+            _pushClient ??= new PushClient();
+
+            if (!_pushConnected)
+                _pushConnected = _pushClient.Connect();
+
+            if (!_pushConnected) return;
+
+            // 推送 CPU 温度
+            lock (_lock)
+            {
+                double cpuTemp = _amdTctl > 0 ? _amdTctl : _intelTemp;
+                string cpuSource = _amdTctl > 0 ? "Broker_SMU" : (_intelTemp > 0 ? "Broker_MSR" : "");
+                if (cpuTemp > 0)
+                    _pushClient.PushCpuTemp(cpuTemp, cpuSource);
+            }
+
+            // 推送 GPU 数据
+            lock (_lock)
+            {
+                for (int i = 0; i < _gpuData.Count; i++)
+                {
+                    var g = _gpuData[i];
+                    _pushClient.PushGpuData(i, g.Name, g.Temperature,
+                        g.UsagePercent, g.MemoryUsedMB, g.MemoryTotalMB);
+                }
+            }
+
+            // 心跳
+            _pushClient.Ping();
+        }
+        catch (Exception ex)
+        {
+            Log($"PushToPlugin error: {ex.Message}");
+            _pushConnected = false;
         }
     }
 
