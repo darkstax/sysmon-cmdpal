@@ -284,17 +284,30 @@ public class SystemInfoService
     }
 
     // ===== Network =====
-    /// <summary>读取所有活跃网络接口的字节计数。upload=true 返回已发送，false 返回已接收。</summary>
+    /// <summary>读取所有活跃物理网络接口的字节计数。upload=true 返回已发送，false 返回已接收。</summary>
     private static long ReadNetBytes(bool upload)
     {
         long total = 0;
         foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
         {
-            if (ni.OperationalStatus == OperationalStatus.Up)
-            {
-                var stats = ni.GetIPStatistics();
-                total += upload ? stats.BytesSent : stats.BytesReceived;
-            }
+            if (ni.OperationalStatus != OperationalStatus.Up)
+                continue;
+
+            // 只计算物理网络接口，排除虚拟接口
+            if (ni.NetworkInterfaceType is not
+                (NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211))
+                continue;
+
+            // 排除 Hyper-V / WSL2 / Docker 虚拟交换机
+            var desc = ni.Description ?? "";
+            if (desc.Contains("Hyper-V") || desc.Contains("vEthernet") ||
+                desc.Contains("WSL") || desc.Contains("Virtual") ||
+                desc.Contains("Loopback") || desc.Contains("Teredo") ||
+                desc.Contains("ISATAP"))
+                continue;
+
+            var stats = ni.GetIPStatistics();
+            total += upload ? stats.BytesSent : stats.BytesReceived;
         }
         return total;
     }
