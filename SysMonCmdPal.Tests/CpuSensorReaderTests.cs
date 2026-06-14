@@ -45,10 +45,10 @@ public class CpuSensorReaderTests : IDisposable
     [Fact]
     public void CpuTempResult_ValidTemp_IsValid()
     {
-        var r = new CpuTempResult(65.5, "Broker_SMU");
+        var r = new CpuTempResult(65.5, "HWiNFO");
         Assert.True(r.IsValid);
         Assert.Equal(65.5, r.Temperature);
-        Assert.Equal("Broker_SMU", r.Source);
+        Assert.Equal("HWiNFO", r.Source);
     }
 
     [Fact]
@@ -76,8 +76,8 @@ public class CpuSensorReaderTests : IDisposable
     [Fact]
     public void CpuTempResult_RecordStruct_Equality()
     {
-        var a = new CpuTempResult(65.5, "Broker_SMU");
-        var b = new CpuTempResult(65.5, "Broker_SMU");
+        var a = new CpuTempResult(65.5, "HWiNFO");
+        var b = new CpuTempResult(65.5, "HWiNFO");
         Assert.Equal(a, b);
     }
 
@@ -88,9 +88,8 @@ public class CpuSensorReaderTests : IDisposable
     [Fact]
     public void Read_AllSourcesUnavailable_ReturnsNone()
     {
-        // 配置只含 ThermalZone，且禁用 ThermalZone
         File.WriteAllText(_tempConfigPath,
-            """{"version":"3","precisionMode":"None","cpuChain":["ThermalZone"],"gpuChain":[]}""");
+            """{"version":"4","precisionModeStr":"HWiNFO","cpuChain":["ThermalZone"],"gpuChain":[]}""");
 
         // 强制 ThermalZoneReader 不可用
         SetInstanceField<ThermalZoneReader>("_available", false);
@@ -106,7 +105,7 @@ public class CpuSensorReaderTests : IDisposable
     public void Read_EmptyChain_ReturnsNone()
     {
         File.WriteAllText(_tempConfigPath,
-            """{"version":"3","precisionMode":"None","cpuChain":[],"gpuChain":[]}""");
+            """{"version":"4","precisionModeStr":"HWiNFO","cpuChain":[],"gpuChain":[]}""");
 
         var result = CpuSensorReader.Read();
 
@@ -116,9 +115,8 @@ public class CpuSensorReaderTests : IDisposable
     [Fact]
     public void Read_UnknownSource_SkipsToNext()
     {
-        // "UnknownSource" 不是有效数据源 → ReadFromSource 返回 None
         File.WriteAllText(_tempConfigPath,
-            """{"version":"3","precisionMode":"None","cpuChain":["UnknownSource"],"gpuChain":[]}""");
+            """{"version":"4","precisionModeStr":"HWiNFO","cpuChain":["UnknownSource"],"gpuChain":[]}""");
 
         var result = CpuSensorReader.Read();
 
@@ -126,24 +124,16 @@ public class CpuSensorReaderTests : IDisposable
     }
 
     // ================================================================
-    // 回退链: Broker 子链测试（通过控制 IsAvailable）
+    // HWiNFO 链（商店版最高优先级）
     // ================================================================
 
     [Fact]
-    public void Read_BrokerChain_AllPhasesUnavailable_ReturnsNone()
+    public void Read_HWiNFOChain_AllPhasesUnavailable_ReturnsNone()
     {
         File.WriteAllText(_tempConfigPath,
-            """{"version":"3","precisionMode":"Broker","cpuChain":["Broker"],"gpuChain":[]}""");
+            """{"version":"4","precisionModeStr":"HWiNFO","cpuChain":["HWiNFO","ADL","ThermalZone","LHM"],"gpuChain":[]}""");
 
-        // 禁用所有 Broker 子链阶段
-        SetInstanceField<BrokerClient>("_isAvailable", false);
-        SetInstanceField<BrokerClient>("_lastAttempt", DateTime.UtcNow);
-        SetInstanceField<IntelMsrReader>("_available", false);
-        SetInstanceField<IntelMsrReader>("_initAttempted", true);
-        SetInstanceField<AmdSmuReader>("_available", false);
-        SetInstanceField<AmdSmuReader>("_initAttempted", true);
-        SetInstanceField<LhmHttpReader>("_available", false);
-        SetInstanceField<LhmHttpReader>("_initAttempted", true);
+        // 禁用所有数据源
         SetInstanceField<AmdTempReader>("_adlAvailable", false);
         SetInstanceField<AmdTempReader>("_adlInitAttempted", true);
         SetInstanceField<LhmSensorService>("_available", false);
@@ -159,16 +149,11 @@ public class CpuSensorReaderTests : IDisposable
     public void Read_ThermalZoneAvailable_ReturnsThermalZone()
     {
         File.WriteAllText(_tempConfigPath,
-            """{"version":"3","precisionMode":"Broker","cpuChain":["ThermalZone","Broker"],"gpuChain":[]}""");
-
-        // 确保 Broker 不可用（否则会先走 Broker 子链）
-        SetInstanceField<BrokerClient>("_isAvailable", false);
-        SetInstanceField<BrokerClient>("_lastAttempt", DateTime.UtcNow);
+            """{"version":"4","precisionModeStr":"HWiNFO","cpuChain":["ThermalZone"],"gpuChain":[]}""");
 
         var result = CpuSensorReader.Read();
 
         // ThermalZone 在真实环境中可能可用也可能不可用
-        // 这是一个集成性质的测试，验证 ThermalZone 路径可达
         Assert.True(result.IsValid || !result.IsValid, "Should not throw");
     }
 
@@ -179,9 +164,8 @@ public class CpuSensorReaderTests : IDisposable
     [Fact]
     public void Read_RespectsChainOrder()
     {
-        // 先 HWiNFO 后 ThermalZone（非默认顺序）
         File.WriteAllText(_tempConfigPath,
-            """{"version":"3","precisionMode":"None","cpuChain":["HWiNFO","ThermalZone"],"gpuChain":[]}""");
+            """{"version":"4","precisionModeStr":"HWiNFO","cpuChain":["HWiNFO","ThermalZone"],"gpuChain":[]}""");
 
         var result = CpuSensorReader.Read();
 

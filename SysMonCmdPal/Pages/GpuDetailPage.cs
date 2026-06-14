@@ -60,9 +60,10 @@ internal sealed partial class GpuDetailPage : ContentPage
 
     private static string BackendLabel(SensorBackend b) => b switch
     {
-        SensorBackend.Lhm => "LHM (PawnIO) ✓",
-        SensorBackend.AmdAdl => "AMD ADL (仅 CPU)",
-        SensorBackend.HwInfo => "HWiNFO 共享内存",
+        SensorBackend.HwInfo => "HWiNFO 共享内存 ✓",
+        SensorBackend.Lhm => "LHM 传感器库 ✓",
+        SensorBackend.AmdAdl => "AMD ADL",
+        SensorBackend.ThermalZone => "ACPI 热区",
         SensorBackend.None => "无可用后端 ✗",
         _ => "未知",
     };

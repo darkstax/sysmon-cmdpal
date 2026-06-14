@@ -33,21 +33,21 @@ public class SensorChainConfigTests : IDisposable
         try { Directory.Delete(_tempDir, true); } catch { }
     }
 
-    // ── 默认值 ──
+    // ── 默认值 (v4) ──
 
     [Fact]
-    public void DefaultValues_VersionIs3()
+    public void DefaultValues_VersionIs4()
     {
         var cfg = new SensorChainConfig();
-        Assert.Equal("3", cfg.Version);
+        Assert.Equal("4", cfg.Version);
     }
 
     [Fact]
-    public void DefaultValues_PrecisionModeIsBroker()
+    public void DefaultValues_PrecisionModeIsHWiNFO()
     {
         var cfg = new SensorChainConfig();
-        Assert.Equal(PrecisionMode.Broker, cfg.PrecisionMode);
-        Assert.Equal("Broker", cfg.PrecisionModeStr);
+        Assert.Equal(PrecisionMode.HWiNFO, cfg.PrecisionMode);
+        Assert.Equal("HWiNFO", cfg.PrecisionModeStr);
     }
 
     [Fact]
@@ -59,19 +59,17 @@ public class SensorChainConfigTests : IDisposable
     }
 
     [Fact]
-    public void DefaultCpuChain_HasThreeEntries()
+    public void DefaultCpuChain_HasFourEntries()
     {
         var cfg = new SensorChainConfig();
-        Assert.Equal(3, cfg.CpuChain.Count);
+        Assert.Equal(4, cfg.CpuChain.Count);
     }
 
     // ── PrecisionMode 解析 ──
 
     [Theory]
-    [InlineData("Broker", PrecisionMode.Broker)]
     [InlineData("HWiNFO", PrecisionMode.HWiNFO)]
     [InlineData("None", PrecisionMode.None)]
-    [InlineData("broker", PrecisionMode.Broker)]   // 大小写不敏感
     [InlineData("hwinfo", PrecisionMode.HWiNFO)]
     public void PrecisionMode_ParsesCorrectly(string str, PrecisionMode expected)
     {
@@ -80,26 +78,33 @@ public class SensorChainConfigTests : IDisposable
     }
 
     [Fact]
-    public void PrecisionMode_InvalidString_FallsBackToBroker()
+    public void PrecisionMode_BrokerMigratesToHWiNFO()
+    {
+        var cfg = new SensorChainConfig { PrecisionModeStr = "Broker" };
+        Assert.Equal(PrecisionMode.HWiNFO, cfg.PrecisionMode);
+    }
+
+    [Fact]
+    public void PrecisionMode_InvalidString_FallsBackToHWiNFO()
     {
         var cfg = new SensorChainConfig { PrecisionModeStr = "InvalidValue" };
-        Assert.Equal(PrecisionMode.Broker, cfg.PrecisionMode);
+        Assert.Equal(PrecisionMode.HWiNFO, cfg.PrecisionMode);
     }
 
     [Fact]
     public void PrecisionMode_Setter_UpdatesString()
     {
         var cfg = new SensorChainConfig();
-        cfg.PrecisionMode = PrecisionMode.HWiNFO;
-        Assert.Equal("HWiNFO", cfg.PrecisionModeStr);
+        cfg.PrecisionMode = PrecisionMode.None;
+        Assert.Equal("None", cfg.PrecisionModeStr);
     }
 
     // ── HighPrecision 兼容性 ──
 
     [Fact]
-    public void HighPrecision_TrueWhenBroker()
+    public void HighPrecision_TrueWhenHWiNFO()
     {
-        var cfg = new SensorChainConfig { PrecisionModeStr = "Broker" };
+        var cfg = new SensorChainConfig { PrecisionModeStr = "HWiNFO" };
         Assert.True(cfg.HighPrecision);
     }
 
@@ -113,17 +118,10 @@ public class SensorChainConfigTests : IDisposable
     // ── DefaultCpuChain ──
 
     [Fact]
-    public void DefaultCpuChain_BrokerMode()
-    {
-        var cfg = new SensorChainConfig { PrecisionModeStr = "Broker" };
-        Assert.Equal(new[] { "Broker", "ThermalZone", "HWiNFO" }, cfg.DefaultCpuChain);
-    }
-
-    [Fact]
     public void DefaultCpuChain_HWiNFOMode()
     {
         var cfg = new SensorChainConfig { PrecisionModeStr = "HWiNFO" };
-        Assert.Equal(new[] { "HWiNFO", "ThermalZone", "Broker" }, cfg.DefaultCpuChain);
+        Assert.Equal(new[] { "HWiNFO", "ADL", "ThermalZone", "LHM" }, cfg.DefaultCpuChain);
     }
 
     [Fact]
@@ -159,7 +157,6 @@ public class SensorChainConfigTests : IDisposable
     {
         var cfg = new SensorChainConfig();
         var json = JsonSerializer.Serialize(cfg, GetOptions());
-        // JSON property names use camelCase: precisionModeStr → "precisionModeStr", cpuChain → "cpuChain"
         Assert.Contains("\"precisionModeStr\"", json);
         Assert.Contains("\"cpuChain\"", json);
         Assert.Contains("\"gpuChain\"", json);
@@ -171,8 +168,8 @@ public class SensorChainConfigTests : IDisposable
         var original = new SensorChainConfig
         {
             PrecisionModeStr = "HWiNFO",
-            CpuChain = ["HWiNFO", "ThermalZone"],
-            GpuChain = ["ThermalZone"],
+            CpuChain = ["HWiNFO", "ADL", "ThermalZone"],
+            GpuChain = ["LHM", "HWiNFO"],
             GpuModeStr = "All",
         };
         var json = JsonSerializer.Serialize(original, GetOptions());
@@ -188,15 +185,15 @@ public class SensorChainConfigTests : IDisposable
     // ── 版本迁移 ──
 
     [Fact]
-    public void Load_V1_HighPrecisionTrue_MigratesToBroker()
+    public void Load_V1_HighPrecisionTrue_MigratesToHWiNFO()
     {
         File.WriteAllText(_tempPath, """{"highPrecision":true}""");
 
         var cfg = SensorChainConfig.Load();
 
-        Assert.Equal("3", cfg.Version);
-        Assert.Equal(PrecisionMode.Broker, cfg.PrecisionMode);
-        Assert.Equal(new[] { "Broker", "ThermalZone", "HWiNFO" }, cfg.CpuChain);
+        Assert.Equal("4", cfg.Version);
+        Assert.Equal(PrecisionMode.HWiNFO, cfg.PrecisionMode);
+        Assert.Equal(new[] { "HWiNFO", "ADL", "ThermalZone", "LHM" }, cfg.CpuChain);
     }
 
     [Fact]
@@ -206,36 +203,38 @@ public class SensorChainConfigTests : IDisposable
 
         var cfg = SensorChainConfig.Load();
 
-        Assert.Equal("3", cfg.Version);
+        Assert.Equal("4", cfg.Version);
         Assert.Equal(PrecisionMode.None, cfg.PrecisionMode);
         Assert.Equal(new[] { "ThermalZone", "HWiNFO" }, cfg.CpuChain);
     }
 
     [Fact]
-    public void Load_V2_WithCpuChain_MigratesVersion()
+    public void Load_V3_BrokerPrecisionMode_MigratesToHWiNFO()
     {
         File.WriteAllText(_tempPath, """
-            {"version":"2","precisionMode":"HWiNFO","cpuChain":["HWiNFO","ThermalZone"]}
+            {"version":"3","precisionModeStr":"Broker","cpuChain":["Broker","ThermalZone"],"gpuChain":["Broker","ThermalZone"]}
             """);
 
         var cfg = SensorChainConfig.Load();
 
-        Assert.Equal("3", cfg.Version);
-        Assert.Equal(PrecisionMode.HWiNFO, cfg.PrecisionMode);
+        Assert.Equal("4", cfg.Version);
+        Assert.Equal("HWiNFO", cfg.PrecisionModeStr);
+        Assert.DoesNotContain("Broker", cfg.CpuChain);
+        Assert.DoesNotContain("Broker", cfg.GpuChain);
     }
 
     [Fact]
-    public void Load_V3_DirectDeserialize()
+    public void Load_V4_DirectDeserialize()
     {
         File.WriteAllText(_tempPath, """
-            {"version":"3","precisionMode":"None","cpuChain":["ThermalZone"],"gpuChain":["ThermalZone"],"gpuModeStr":"DedicatedOnly"}
+            {"version":"4","precisionModeStr":"HWiNFO","cpuChain":["HWiNFO","ADL"],"gpuChain":["LHM"],"gpuModeStr":"DedicatedOnly"}
             """);
 
         var cfg = SensorChainConfig.Load();
 
-        Assert.Equal("3", cfg.Version);
-        Assert.Equal(PrecisionMode.None, cfg.PrecisionMode);
-        Assert.Single(cfg.CpuChain);
+        Assert.Equal("4", cfg.Version);
+        Assert.Equal(PrecisionMode.HWiNFO, cfg.PrecisionMode);
+        Assert.Equal(2, cfg.CpuChain.Count);
         Assert.Equal("DedicatedOnly", cfg.GpuModeStr);
     }
 
@@ -247,8 +246,8 @@ public class SensorChainConfigTests : IDisposable
         var original = new SensorChainConfig
         {
             PrecisionModeStr = "HWiNFO",
-            CpuChain = ["HWiNFO", "ThermalZone", "Broker"],
-            GpuChain = ["ThermalZone"],
+            CpuChain = ["HWiNFO", "ADL", "ThermalZone"],
+            GpuChain = ["LHM", "ADL"],
             GpuModeStr = "All",
         };
         original.Save();
@@ -271,8 +270,8 @@ public class SensorChainConfigTests : IDisposable
 
         var cfg = SensorChainConfig.Load();
 
-        Assert.Equal(PrecisionMode.Broker, cfg.PrecisionMode);
-        Assert.Equal("3", cfg.Version);
+        Assert.Equal(PrecisionMode.HWiNFO, cfg.PrecisionMode);
+        Assert.Equal("4", cfg.Version);
     }
 
     // ── helpers ──

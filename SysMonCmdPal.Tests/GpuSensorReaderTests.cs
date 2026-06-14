@@ -44,20 +44,20 @@ public class GpuSensorReaderTests : IDisposable
     [Fact]
     public void GpuResult_Valid_IsValid()
     {
-        var r = new GpuResult("AMD Radeon RX 680M", 45.0, 62.5, 512, 2048, "Broker");
+        var r = new GpuResult("AMD Radeon RX 680M", 45.0, 62.5, 512, 2048, "LHM");
         Assert.True(r.IsValid);
         Assert.Equal("AMD Radeon RX 680M", r.Name);
         Assert.Equal(45.0, r.UsagePercent);
         Assert.Equal(62.5, r.Temperature);
         Assert.Equal(512, r.MemoryUsedMB);
         Assert.Equal(2048, r.MemoryTotalMB);
-        Assert.Equal("Broker", r.Source);
+        Assert.Equal("LHM", r.Source);
     }
 
     [Fact]
     public void GpuResult_EmptyName_IsInvalid()
     {
-        var r = new GpuResult("", 45.0, 62.5, 512, 2048, "Broker");
+        var r = new GpuResult("", 45.0, 62.5, 512, 2048, "LHM");
         Assert.False(r.IsValid);
     }
 
@@ -74,8 +74,8 @@ public class GpuSensorReaderTests : IDisposable
     [Fact]
     public void GpuResult_RecordStruct_Equality()
     {
-        var a = new GpuResult("GPU1", 50, 70, 1024, 4096, "Broker");
-        var b = new GpuResult("GPU1", 50, 70, 1024, 4096, "Broker");
+        var a = new GpuResult("GPU1", 50, 70, 1024, 4096, "LHM");
+        var b = new GpuResult("GPU1", 50, 70, 1024, 4096, "LHM");
         Assert.Equal(a, b);
     }
 
@@ -87,7 +87,7 @@ public class GpuSensorReaderTests : IDisposable
     public void Read_NoGpus_ReturnsNone()
     {
         File.WriteAllText(_tempConfigPath,
-            """{"version":"3","precisionMode":"None","cpuChain":[],"gpuChain":["ThermalZone"]}""");
+            """{"version":"4","precisionModeStr":"HWiNFO","cpuChain":[],"gpuChain":["ThermalZone"]}""");
 
         // 禁用 ThermalZone
         SetInstanceField<ThermalZoneReader>("_available", false);
@@ -103,7 +103,7 @@ public class GpuSensorReaderTests : IDisposable
     public void Read_AllSourcesUnavailable_ReturnsNone()
     {
         File.WriteAllText(_tempConfigPath,
-            """{"version":"3","precisionMode":"None","cpuChain":[],"gpuChain":[]}""");
+            """{"version":"4","precisionModeStr":"HWiNFO","cpuChain":[],"gpuChain":[]}""");
 
         var result = GpuSensorReader.Read();
 
@@ -114,7 +114,7 @@ public class GpuSensorReaderTests : IDisposable
     public void Read_UnknownSource_SkipsToNext()
     {
         File.WriteAllText(_tempConfigPath,
-            """{"version":"3","precisionMode":"None","cpuChain":[],"gpuChain":["InvalidSource"]}""");
+            """{"version":"4","precisionModeStr":"HWiNFO","cpuChain":[],"gpuChain":["InvalidSource"]}""");
 
         var result = GpuSensorReader.Read();
 
@@ -122,22 +122,17 @@ public class GpuSensorReaderTests : IDisposable
     }
 
     // ================================================================
-    // 回退链: Broker → ThermalZone → HWiNFO
+    // 回退链: HWiNFO → ADL → ThermalZone → LHM
     // ================================================================
 
     [Fact]
-    public void ReadAll_BrokerUnavailable_FallsBack()
+    public void ReadAll_HWiNFOUnavailable_FallsBack()
     {
         File.WriteAllText(_tempConfigPath,
-            """{"version":"3","precisionMode":"Broker","cpuChain":[],"gpuChain":["Broker","ThermalZone"]}""");
-
-        // 禁用 Broker
-        SetInstanceField<BrokerClient>("_isAvailable", false);
-        SetInstanceField<BrokerClient>("_lastAttempt", DateTime.UtcNow);
+            """{"version":"4","precisionModeStr":"HWiNFO","cpuChain":[],"gpuChain":["HWiNFO","LHM"]}""");
 
         var results = GpuSensorReader.ReadAll();
 
-        // 可能从 ThermalZone 获取到数据，也可能没有
         Assert.NotNull(results);
     }
 
@@ -145,18 +140,14 @@ public class GpuSensorReaderTests : IDisposable
     // 过滤逻辑验证（通过结构体值推断）
     // ================================================================
 
-    // 注: ApplyGpuModeFilter 和 FilterBy3DActivity 是 private static，
-    // 无法直接测试。这里通过集成测试间接验证。
-
     [Fact]
     public void ReadAll_RespectsConfig()
     {
         File.WriteAllText(_tempConfigPath,
-            """{"version":"3","precisionMode":"Broker","cpuChain":[],"gpuChain":["Broker"],"gpuModeStr":"All"}""");
+            """{"version":"4","precisionModeStr":"HWiNFO","cpuChain":[],"gpuChain":["LHM"],"gpuModeStr":"All"}""");
 
         var results = GpuSensorReader.ReadAll();
 
-        // 在无 Broker 环境下应返回空列表
         Assert.NotNull(results);
     }
 

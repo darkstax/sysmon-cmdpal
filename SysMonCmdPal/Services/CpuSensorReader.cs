@@ -1,16 +1,15 @@
 // Copyright (c) 2026 SysMonCmdPal
-// CPU 温度读取器 — 完整回退链，自包含于单个文件。
+// CPU 温度读取器 — 商店安全版回退链，所有数据源均为用户态。
 // 用户可通过设置自定义数据源优先级链:
-//   "Broker"      = 高精度子链: Broker → PawnIO MSR → PawnIO SMU → LHM HTTP → ADL → LHM
+//   "HWiNFO"      = HWiNFO 共享内存 (最精准, 需 HWiNFO 运行中)
 //   "ThermalZone" = Windows ACPI 热区温度 (PerformanceCounter)
-//   "HWiNFO"      = HWiNFO 共享内存
+//   "ADL"         = AMD ADL PMLOG CPU sensor 32 (仅 AMD CPU)
+//   "LHM"         = LibreHardwareMonitor NuGet (免驱动, 精度较低)
 //
 // 注:
-//   - Broker = SysMonBroker 计划任务进程，通过命名管道提供精准 Tctl/Tdie
-//   - PawnIO 需要管理员权限（SDDL 仅授予 SY/BA GENERIC_READ|WRITE）
-//   - LHM HTTP = 外部 LHM 独立版 Web 服务器 (localhost:8085)
-//   - Thermal Zone = Windows ACPI 热区温度（PerformanceCounter，无需管理员）
+//   - HWiNFO 共享内存提供精确 Tctl/Tdie
 //   - ADL PMLOG sensor 32 读数比 Tctl/Tdie 偏低 ~5°C，已应用校准偏移
+//   - Thermal Zone 无需管理员权限，始终可用
 
 using System;
 using System.Linq;
@@ -49,120 +48,25 @@ internal static class CpuSensorReader
     {
         return source switch
         {
-            "Broker" => ReadFromBrokerChain(),
-            "ThermalZone" => ReadFromThermalZone(),
             "HWiNFO" => ReadFromHwInfo(),
+            "ThermalZone" => ReadFromThermalZone(),
+            "ADL" => ReadFromAdl(),
+            "LHM" => ReadFromLhm(),
             _ => CpuTempResult.None,
         };
     }
 
-    /// <summary>
-    /// Broker 子链: Broker 命名管道 → PawnIO MSR (Intel) → PawnIO SMU (AMD)
-    /// → LHM HTTP → ADL PMLOG (AMD 校准) → LHM NuGet
-    /// </summary>
-    private static CpuTempResult ReadFromBrokerChain()
-    {
-        // Phase 0: Broker — 高精度模式，通过命名管道从管理员进程获取精准 Tctl/Tdie
-        var broker = ReadFromBroker();
-        if (broker.IsValid) return broker;
-
-        // Phase 1: PawnIO — Intel MSR (所有 Intel CPU, 需要管理员)
-        var pawnMsr = ReadFromPawnMsr();
-        if (pawnMsr.IsValid) return pawnMsr;
-
-        // Phase 2: PawnIO — AMD SMU (所有 AMD CPU, 需要管理员, 准确的 Tctl/Tdie)
-        var pawnSmu = ReadFromPawnSmu();
-        if (pawnSmu.IsValid) return pawnSmu;
-
-        // Phase 3: LHM HTTP — 外部 LHM 独立版 Web 服务器（准确的 Tctl/Tdie）
-        var lhmHttp = ReadFromLhmHttp();
-        if (lhmHttp.IsValid) return lhmHttp;
-
-        // Phase 4: AMD ADL PMLOG + 校准（CPU sensor 32，SoC 温度 + 5°C 偏移）
-        var adlResult = ReadFromAdl();
-        if (adlResult.IsValid) return adlResult;
-
-        // Phase 5: LHM NuGet（嵌入式，AppContainer 下通常返回 0）
-        var lhmResult = ReadFromLhm();
-        if (lhmResult.IsValid) return lhmResult;
-
-        return CpuTempResult.None;
-    }
-
-    private static CpuTempResult ReadFromBroker()
+    private static CpuTempResult ReadFromHwInfo()
     {
         try
         {
-            if (!BrokerClient.Instance.IsAvailable)
-                return CpuTempResult.None;
-
-            // AMD: 尝试 SMU Tctl/Tdie
-            double amdTemp = BrokerClient.Instance.ReadAmdTctl();
-            if (amdTemp > 0)
-                return new CpuTempResult(amdTemp, "Broker_SMU");
-
-            // Intel: 尝试 MSR Package Temp
-            double intelTemp = BrokerClient.Instance.ReadIntelTemp();
-            if (intelTemp > 0)
-                return new CpuTempResult(intelTemp, "Broker_MSR");
-        }
-        catch (Exception ex)
-        {
-            SensorLogger.ForceLog($"CPU Broker 异常: {ex.Message}");
-        }
-        return CpuTempResult.None;
-    }
-
-    private static CpuTempResult ReadFromPawnMsr()
-    {
-        try
-        {
-            if (!IntelMsrReader.Instance.IsAvailable)
-                return CpuTempResult.None;
-
-            double temp = IntelMsrReader.Instance.ReadPackageTemp();
+            int temp = AmdTempReader.Instance.ReadCpuTempViaHwInfoOnly();
             if (temp > 0)
-                return new CpuTempResult(temp, "PawnIO_MSR");
+                return new CpuTempResult(temp, "HWiNFO");
         }
         catch (Exception ex)
         {
-            SensorLogger.ForceLog($"CPU PawnIO MSR 异常: {ex.Message}");
-        }
-        return CpuTempResult.None;
-    }
-
-    private static CpuTempResult ReadFromPawnSmu()
-    {
-        try
-        {
-            if (!AmdSmuReader.Instance.IsAvailable)
-                return CpuTempResult.None;
-
-            double temp = AmdSmuReader.Instance.ReadCpuTemp();
-            if (temp > 0)
-                return new CpuTempResult(temp, "PawnIO_SMU");
-        }
-        catch (Exception ex)
-        {
-            SensorLogger.ForceLog($"CPU PawnIO SMU 异常: {ex.Message}");
-        }
-        return CpuTempResult.None;
-    }
-
-    private static CpuTempResult ReadFromLhmHttp()
-    {
-        try
-        {
-            if (!LhmHttpReader.Instance.IsAvailable)
-                return CpuTempResult.None;
-
-            double temp = LhmHttpReader.Instance.ReadCpuTemp();
-            if (temp > 0)
-                return new CpuTempResult(temp, "LHM_HTTP");
-        }
-        catch (Exception ex)
-        {
-            SensorLogger.ForceLog($"CPU LHM HTTP 异常: {ex.Message}");
+            SensorLogger.ForceLog($"CPU HWiNFO 异常: {ex.Message}");
         }
         return CpuTempResult.None;
     }
@@ -193,7 +97,6 @@ internal static class CpuSensorReader
             if (rawTemp > 0)
             {
                 // ADL sensor 32 读取 SoC 域温度，通常比 Tctl/Tdie 偏低 ~5°C
-                // 应用校准偏移使其更接近真实 CPU 温度
                 const double adlCalibrationOffset = 5.0;
                 double calibrated = rawTemp + adlCalibrationOffset;
                 return new CpuTempResult(calibrated, $"ADL+{adlCalibrationOffset:F0}°C");
@@ -233,21 +136,6 @@ internal static class CpuSensorReader
         catch (Exception ex)
         {
             SensorLogger.ForceLog($"CPU LHM 异常: {ex.Message}");
-        }
-        return CpuTempResult.None;
-    }
-
-    private static CpuTempResult ReadFromHwInfo()
-    {
-        try
-        {
-            int temp = AmdTempReader.Instance.ReadCpuTempViaHwInfoOnly();
-            if (temp > 0)
-                return new CpuTempResult(temp, "HWiNFO");
-        }
-        catch (Exception ex)
-        {
-            SensorLogger.ForceLog($"CPU HWiNFO 异常: {ex.Message}");
         }
         return CpuTempResult.None;
     }

@@ -46,9 +46,10 @@ internal sealed partial class CpuDetailPage : ContentPage
 
     private static string BackendLabel(SensorBackend b) => b switch
     {
-        SensorBackend.Lhm => "LHM (PawnIO) ✓",
+        SensorBackend.HwInfo => "HWiNFO 共享内存 ✓",
+        SensorBackend.Lhm => "LHM 传感器库 ✓",
         SensorBackend.AmdAdl => "AMD ADL (回退模式)",
-        SensorBackend.HwInfo => "HWiNFO 共享内存 (回退模式)",
+        SensorBackend.ThermalZone => "ACPI 热区",
         SensorBackend.None => "无可用后端 ✗",
         _ => "未知",
     };

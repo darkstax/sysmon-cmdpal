@@ -87,8 +87,8 @@ public class SystemInfoServiceTests
         Assert.Null(s.Gpus);
         Assert.Null(s.BackendNote);
         Assert.Equal(0, s.CpuTemperature);
-        // enum default ctor = 0 = PawnMsr (first value)
-        Assert.Equal(SensorBackend.PawnMsr, s.Backend);
+        // enum default ctor = 0 = HwInfo (first value)
+        Assert.Equal(SensorBackend.HwInfo, s.Backend);
     }
 
     // ================================================================
@@ -132,15 +132,12 @@ public class SystemInfoServiceTests
     public void SensorBackend_AllValuesDefined()
     {
         var values = Enum.GetValues<SensorBackend>();
-        Assert.Contains(SensorBackend.PawnMsr, values);
-        Assert.Contains(SensorBackend.PawnSmu, values);
+        Assert.Contains(SensorBackend.HwInfo, values);
         Assert.Contains(SensorBackend.Nvapi, values);
-        Assert.Contains(SensorBackend.AdlGpu, values);
+        Assert.Contains(SensorBackend.AmdAdl, values);
         Assert.Contains(SensorBackend.Igcl, values);
         Assert.Contains(SensorBackend.Lhm, values);
-        Assert.Contains(SensorBackend.LhmWmi, values);
-        Assert.Contains(SensorBackend.AmdAdl, values);
-        Assert.Contains(SensorBackend.HwInfo, values);
+        Assert.Contains(SensorBackend.ThermalZone, values);
         Assert.Contains(SensorBackend.None, values);
     }
 

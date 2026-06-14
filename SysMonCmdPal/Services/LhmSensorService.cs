@@ -15,7 +15,7 @@ namespace SysMonCmdPal;
 /// <summary>
 /// LHM 全量传感器服务（单例）。读取所有硬件传感器的当前值，
 /// 按类别分组，供页面和 Dock Band 使用。
-/// 依赖 PawnIO 驱动（一次安装，免管理员）。
+/// 依赖 HWiNFO 共享内存或内置传感器库（免驱动）。
 /// </summary>
 public sealed class LhmSensorService
 {
@@ -125,7 +125,7 @@ public sealed class LhmSensorService
                 }
                 else if (!_available && DateTime.UtcNow - _lastInitAttempt > InitRetryCooldown)
                 {
-                    // 冷却重试：HWiNFO 用户可能稍后启动，或 PawnIO 驱动可能被安装
+                    // 冷却重试：HWiNFO 用户可能稍后启动
                     _lastInitAttempt = DateTime.UtcNow;
                     _consecutiveFailures = 0;
                     InitLhm();

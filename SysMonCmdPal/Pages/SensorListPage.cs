@@ -69,7 +69,7 @@ internal sealed partial class SensorListPage : ListPage
                 Title = "无传感器数据",
                 Subtitle = LhmSensorService.Instance.IsAvailable
                     ? "LHM 已连接，但未检测到传感器"
-                    : "LHM 不可用 — 需要 PawnIO 驱动 + 管理员权限",
+                    : "LHM 不可用 — 需要 HWiNFO 运行中或 LHM 已启用",
                 Icon = new IconInfo(""),
             }];
         }

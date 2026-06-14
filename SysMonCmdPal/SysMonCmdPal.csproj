@@ -83,12 +83,6 @@
     <Content Include="Public\manifest.json" />
   </ItemGroup>
 
-  <!-- Broker: high-precision temperature service (built separately, packaged into MSIX) -->
-  <ItemGroup>
-    <Content Include="Broker\setup-broker.ps1" />
-    <Content Include="Broker\SysMonBroker.exe" Condition="Exists('Broker\SysMonBroker.exe')" />
-  </ItemGroup>
-
   <!-- Assets -->
   <ItemGroup>
     <Content Include="Assets\StoreLogo.png" />
@@ -100,12 +94,6 @@
   <ItemGroup>
     <Folder Include="Commands\" />
     <Folder Include="Services\" />
-  </ItemGroup>
-
-  <!-- PawnIO ring0 模块 — 嵌入为资源供运行时加载 -->
-  <ItemGroup>
-    <EmbeddedResource Include="Pawn\IntelMSR.bin" />
-    <EmbeddedResource Include="Pawn\RyzenSMU.bin" />
   </ItemGroup>
 
 </Project>

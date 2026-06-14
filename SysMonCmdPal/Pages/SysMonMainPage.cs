@@ -97,9 +97,10 @@ internal sealed partial class SysMonMainPage : ListPage
 
     private static string BackendStatusText(SensorBackend b) => b switch
     {
-        SensorBackend.Lhm => "LHM (PawnIO) ✓",
+        SensorBackend.HwInfo => "HWiNFO ✓",
         SensorBackend.AmdAdl => "ADL 回退 (仅 CPU)",
-        SensorBackend.HwInfo => "HWiNFO 回退",
+        SensorBackend.Lhm => "LHM 传感器库",
+        SensorBackend.ThermalZone => "ACPI 热区",
         SensorBackend.None => "无可用传感器后端",
         _ => "未知",
     };

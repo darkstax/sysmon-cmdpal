@@ -141,7 +141,7 @@ public class LhmSensorServiceIntegrationTests
     [Fact]
     public void IsAvailable_ReturnsTrueOrFalse()
     {
-        // LHM 在 PawnIO 驱动未安装时不可用
+        // LHM 在 HWiNFO 或驱动未安装时可能不可用
         bool available = LhmSensorService.Instance.IsAvailable;
 
         // 仅检查不崩溃
@@ -187,7 +187,7 @@ public class SensorChainIntegrationTests : IntegrationTestBase
     {
         // 使用完整回退链配置
         File.WriteAllText(TempConfigPath,
-            """{"version":"3","precisionMode":"Broker","cpuChain":["Broker","ThermalZone","HWiNFO"],"gpuChain":["Broker","ThermalZone","HWiNFO"]}""");
+            """{"version":"4","precisionModeStr":"HWiNFO","cpuChain":["HWiNFO","ThermalZone","ADL"],"gpuChain":["LHM","HWiNFO"]}""");
 
         var result = CpuSensorReader.Read();
 
@@ -199,7 +199,7 @@ public class SensorChainIntegrationTests : IntegrationTestBase
     public void GpuSensorReader_Read_ReturnsResult()
     {
         File.WriteAllText(TempConfigPath,
-            """{"version":"3","precisionMode":"Broker","cpuChain":["Broker"],"gpuChain":["Broker","ThermalZone","HWiNFO"]}""");
+            """{"version":"4","precisionModeStr":"HWiNFO","cpuChain":["HWiNFO"],"gpuChain":["LHM","HWiNFO"]}""");
 
         var result = GpuSensorReader.Read();
 
@@ -210,7 +210,7 @@ public class SensorChainIntegrationTests : IntegrationTestBase
     public void GpuSensorReader_ReadAll_ReturnsList()
     {
         File.WriteAllText(TempConfigPath,
-            """{"version":"3","precisionMode":"Broker","cpuChain":[],"gpuChain":["Broker","ThermalZone","HWiNFO"]}""");
+            """{"version":"4","precisionModeStr":"HWiNFO","cpuChain":[],"gpuChain":["LHM","HWiNFO"]}""");
 
         var results = GpuSensorReader.ReadAll();
 
