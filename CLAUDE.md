@@ -319,6 +319,18 @@ Broker 注册为 COM Local Server (`HKCR\CLSID\{7B3F8A1C-9D2E-4F50-B6C7-D8E9F0A1
         |-- CPU / 内存 / 磁盘 / 下载 / 上传 / 电池 / GPU
 ```
 
+## 开发模式
+
+**管理员权限**：部署/停止 Broker 需要管理员权限。已配置 `gsudo`（全局缓存 5 分钟），开发期间反复需要提权时直接用 `sudo` 命令：
+
+```powershell
+sudo Get-Process SysMonBroker | Stop-Process -Force
+sudo Copy-Item publish\SysMonBroker.exe "$env:LOCALAPPDATA\SysMonBroker\SysMonBroker.exe" -Force
+sudo Start-Process "$env:LOCALAPPDATA\SysMonBroker\SysMonBroker.exe"
+```
+
+不要每次都弹 UAC 窗口，gsudo 缓存期内直接执行。
+
 ## 构建
 
 ```powershell
