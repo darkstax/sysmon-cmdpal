@@ -5,21 +5,25 @@
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <RootNamespace>SysMonBroker</RootNamespace>
     <AssemblyName>SysMonBroker</AssemblyName>
-    <Version>1.1.0.0</Version>
+    <Version>2.2.0.0</Version>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <LangVersion>preview</LangVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PublishTrimmed>true</PublishTrimmed>
     <TrimMode>link</TrimMode>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- IL2026: dynamic COM late-binding is inherently not trim-safe (by design)
+         IL2050: COM interop P/Invoke correctness not guaranteed after trimming -->
+    <NoWarn>IL2026;IL2050</NoWarn>
   </PropertyGroup>
 
-  <!-- PawnIO ring0 modules -->
+  <!-- LHM: sole hardware access layer (PawnIO kernel driver embedded as resources) -->
   <ItemGroup>
-    <EmbeddedResource Include="..\SysMonCmdPal\Pawn\IntelMSR.bin" Link="IntelMSR.bin" />
-    <EmbeddedResource Include="..\SysMonCmdPal\Pawn\RyzenSMU.bin" Link="RyzenSMU.bin" />
+    <PackageReference Include="LibreHardwareMonitorLib" Version="0.9.6" />
   </ItemGroup>
 
 </Project>
