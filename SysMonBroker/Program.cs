@@ -12,7 +12,9 @@
 //   SysMonBroker.exe --register-hash <path> — add exe SHA256 to COM whitelist
 //   SysMonBroker.exe --list-hashes    — show current COM whitelist
 
+using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using SysMonBroker.COM;
 using SysMonBroker.IPC;
@@ -25,8 +27,8 @@ internal static class Program
     // ---- COM class object registration ----
     [DllImport("ole32.dll")]
     private static extern int CoRegisterClassObject(
-        [MarshalAs(UnmanagedType.LPStruct)] Guid rclsid,
-        [MarshalAs(UnmanagedType.IUnknown)] object pUnk,
+        ref Guid rclsid,
+        IntPtr pUnk,
         uint dwClsContext, uint flags, out uint dwRegister);
     [DllImport("ole32.dll")]
     private static extern int CoRevokeClassObject(uint dwRegister);
@@ -91,13 +93,89 @@ internal static class Program
 
         try
         {
-            Log("Creating SensorCollector (LHM Computer.Open)...");
-            collector = new SensorCollector();
-            Log($"SensorCollector ready. PawnIO: {(collector.PawnIoInstalled ? "installed" : "not installed — user-mode sensors only")}");
+            if (isComServer)
+            {
+                // COM server mode: read sensor data from SHM (standalone Broker writes it)
+                // No LHM init needed — starts instantly and returns admin-grade data
+                Log("COM server mode — reading sensors from SharedMemory");
+                Log("Opening SharedMemory (read-only)...");
+                try
+                {
+                    var mmf = MemoryMappedFile.OpenExisting(BrokerSharedMemory.MapName,
+                        MemoryMappedFileRights.Read);
+                    // 读取 SHM 的 volatile state 到 COM server 的 volatile fields
+                    var readShm = () =>
+                    {
+                        using var acc = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+                        // Magic check
+                        if (acc.ReadInt32(0) != BrokerSharedMemory.MagicValue)
+                            return;
+                        // CPU temp (offset 16)
+                        double cpuTemp = acc.ReadDouble(16);
+                        // CpuSource (offset 24, 32 bytes UTF-8)
+                        byte[] srcBuf = new byte[32];
+                        acc.ReadArray(24, srcBuf, 0, 32);
+                        string cpuSrc = Encoding.UTF8.GetString(srcBuf).TrimEnd('\0');
+                        // GpuCount (offset 56)
+                        int gpuCount = Math.Min(acc.ReadInt32(56), BrokerSharedMemory.MaxGpus);
+                        var gpus = new List<Sensors.GpuReading>();
+                        for (int i = 0; i < gpuCount; i++)
+                        {
+                            int bOff = 60 + i * 72;
+                            byte[] nameBuf = new byte[32];
+                            acc.ReadArray(bOff, nameBuf, 0, 32);
+                            string gName = Encoding.UTF8.GetString(nameBuf).TrimEnd('\0');
+                            double gTemp = acc.ReadDouble(bOff + 32);
+                            double gUsage = acc.ReadDouble(bOff + 40);
+                            double gMemUsed = acc.ReadDouble(bOff + 48);
+                            double gMemTotal = acc.ReadDouble(bOff + 56);
+                            gpus.Add(new Sensors.GpuReading(gName, gTemp, gUsage, gMemUsed, gMemTotal));
+                        }
+                        // Sensors (offset 360 count, 364 entries)
+                        int sensorCount = Math.Min(acc.ReadInt32(360), BrokerSharedMemory.MaxSensors);
+                        var sensors = new List<IPC.SensorEntry>();
+                        for (int i = 0; i < sensorCount; i++)
+                        {
+                            int sOff = 364 + i * 64;
+                            int tag = acc.ReadInt32(sOff);
+                            byte[] sNameBuf = new byte[32];
+                            acc.ReadArray(sOff + 4, sNameBuf, 0, 32);
+                            string sName = Encoding.UTF8.GetString(sNameBuf).TrimEnd('\0');
+                            double val = acc.ReadDouble(sOff + 36);
+                            byte[] unitBuf = new byte[16];
+                            acc.ReadArray(sOff + 44, unitBuf, 0, 16);
+                            string unit = Encoding.UTF8.GetString(unitBuf).TrimEnd('\0');
+                            int hwTag = acc.ReadInt32(sOff + 60);
+                            sensors.Add(new IPC.SensorEntry(tag, sName, val, unit, hwTag));
+                        }
+                        Volatile.Write(ref _lastCpuTemp, cpuTemp);
+                        _lastCpuSource = cpuSrc;
+                        _lastGpus = gpus;
+                        _lastSensors = sensors;
+                    };
+                    Log($"SharedMemory: {BrokerSharedMemory.MapName} (read-only OK)");
+                    // Initial read
+                    readShm();
+                    // Background timer to read SHM every 2s
+                    var shmTimer = new System.Threading.Timer(_ => readShm(), null, 0, 2000);
+                    cts.Token.Register(() => shmTimer.Dispose());
+                }
+                catch (Exception ex)
+                {
+                    Log($"SharedMemory open failed: {ex.Message} — COM server will return stale data");
+                }
+            }
+            else
+            {
+                // Standalone mode: LHM sensor collection + SHM writer
+                Log("Creating SensorCollector (LHM Computer.Open)...");
+                collector = new SensorCollector();
+                Log($"SensorCollector ready. PawnIO: {(collector.PawnIoInstalled ? "installed" : "not installed — user-mode sensors only")}");
 
-            Log("Creating SharedMemory v2...");
-            shm = new BrokerSharedMemory();
-            Log($"SharedMemory: {BrokerSharedMemory.MapName} (size={BrokerSharedMemory.MapSize})");
+                Log("Creating SharedMemory v2...");
+                shm = new BrokerSharedMemory();
+                Log($"SharedMemory: {BrokerSharedMemory.MapName} (size={BrokerSharedMemory.MapSize})");
+            }
 
             // ---- COM Server setup ----
             comServer = new BrokerComServer();
@@ -106,10 +184,10 @@ internal static class Program
             comServer.SensorProvider = () => _lastSensors;
             Log("COM server ready (IBrokerService + IBrokerProcessService + IBrokerSensorService)");
 
-            // ---- Register COM class object with SCM ----
-            if (isComServer)
+            // ---- Register COM class object with SCM (v2.2: standalone also registers) ----
+            // Standalone mode: register so CoCreateInstance connects directly (no --com-server launch needed)
+            // COM server mode: register for SCM-launched instances (no SHM, standalone handles that)
             {
-                // v2.2: 补全 COM 初始化（之前缺失导致 CoRegisterClassObject 崩溃）
                 int initHr = CoInitializeEx(IntPtr.Zero, COINIT_MULTITHREADED);
                 if (initHr < 0)
                 {
@@ -117,9 +195,11 @@ internal static class Program
                     return initHr;
                 }
 
+                Guid brokerClsid = new(BrokerGuids.BrokerServiceClsid);
+                IntPtr pUnk = Marshal.GetIUnknownForObject(comServer);
                 int hr = CoRegisterClassObject(
-                    new Guid(BrokerGuids.BrokerServiceClsid),
-                    comServer,
+                    ref brokerClsid,
+                    pUnk,
                     CLSCTX_LOCAL_SERVER,
                     REGCLS_MULTIPLEUSE,
                     out comCookie);
@@ -129,7 +209,7 @@ internal static class Program
                     CoUninitialize();
                     return hr;
                 }
-                Log($"CoRegisterClassObject OK, cookie={comCookie}");
+                Log($"CoRegisterClassObject OK, cookie={comCookie} (mode={(isComServer ? "COM" : "standalone")})");
             }
 
             // JSON snapshot path
@@ -144,37 +224,43 @@ internal static class Program
                 cycle++;
                 try
                 {
-                    // Read sensors (single-threaded, LHM is not thread-safe)
-                    var (cpuTemp, cpuSource) = collector.ReadCpuTemp();
-                    var gpus = collector.ReadGpus();
-                    var sensors = collector.ReadAllSensors();
-
-                    // Update volatile state for COM clients
-                    Volatile.Write(ref _lastCpuTemp, cpuTemp);
-                    _lastCpuSource = cpuSource;
-                    _lastGpus = gpus;
-                    _lastSensors = sensors;
-
-                    // Write to shared memory (for Plugin)
-                    shm.Write(cpuTemp, cpuSource, gpus, sensors);
-
-                    // Write JSON snapshot (every 10 cycles = 20s)
-                    if (cycle % 10 == 1)
-                        WriteSnapshot(snapshotPath, cpuTemp, cpuSource, gpus, sensors);
-
-                    if (cycle <= 3 || cycle % 30 == 1)
+                    if (!isComServer && collector != null)
                     {
-                        Log($"cycle={cycle} cpu={cpuTemp:F1}°C [{cpuSource}] gpus={gpus.Count} " +
-                            $"sensors={sensors.Count}");
-                        if (cycle <= 2)
+                        // Standalone mode: read sensors, write SHM + JSON
+                        var (cpuTemp, cpuSource) = collector.ReadCpuTemp();
+                        var gpus = collector.ReadGpus();
+                        var sensors = collector.ReadAllSensors();
+
+                        Volatile.Write(ref _lastCpuTemp, cpuTemp);
+                        _lastCpuSource = cpuSource;
+                        _lastGpus = gpus;
+                        _lastSensors = sensors;
+
+                        shm?.Write(cpuTemp, cpuSource, gpus, sensors);
+
+                        if (cycle % 10 == 1)
+                            WriteSnapshot(snapshotPath, cpuTemp, cpuSource, gpus, sensors);
+
+                        if (cycle <= 3 || cycle % 30 == 1)
                         {
-                            foreach (var g in gpus)
-                                Log($"  gpu: {g.Name} temp={g.TempCelsius:F1}°C load={g.UsagePercent:F0}%");
-                            var byCategory = sensors.GroupBy(s => s.Tag)
-                                .OrderBy(g => g.Key)
-                                .Select(g => $"{ShmTagName(g.Key)}:{g.Count()}");
-                            Log($"  sensors: {string.Join(", ", byCategory)}");
+                            Log($"cycle={cycle} cpu={cpuTemp:F1}°C [{cpuSource}] gpus={gpus.Count} " +
+                                $"sensors={sensors.Count}");
+                            if (cycle <= 2)
+                            {
+                                foreach (var g in gpus)
+                                    Log($"  gpu: {g.Name} temp={g.TempCelsius:F1}°C load={g.UsagePercent:F0}%");
+                                var byCategory = sensors.GroupBy(s => s.Tag)
+                                    .OrderBy(g => g.Key)
+                                    .Select(g => $"{ShmTagName(g.Key)}:{g.Count()}");
+                                Log($"  sensors: {string.Join(", ", byCategory)}");
+                            }
                         }
+                    }
+                    else if (isComServer && cycle <= 3)
+                    {
+                        // COM server: log periodically to show we're alive
+                        double temp = Volatile.Read(ref _lastCpuTemp);
+                        Log($"cycle={cycle} cpu={temp:F1}°C [{_lastCpuSource}] (from SHM)");
                     }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -201,7 +287,7 @@ internal static class Program
         finally
         {
             Log("Shutting down...");
-            if (isComServer && comCookie != 0)
+            if (comCookie != 0)
             {
                 CoRevokeClassObject(comCookie);
                 Log($"CoRevokeClassObject({comCookie}) OK");
@@ -209,7 +295,7 @@ internal static class Program
             comServer?.Dispose();
             shm?.Dispose();
             collector?.Dispose();
-            if (isComServer) CoUninitialize();
+            CoUninitialize();
             Log("=== SysMonBroker stopped ===");
         }
 
