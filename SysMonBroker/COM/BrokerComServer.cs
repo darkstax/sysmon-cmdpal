@@ -10,6 +10,44 @@ using Microsoft.Win32;
 namespace SysMonBroker.COM;
 
 /// <summary>
+/// Broker COM Class Factory — CoRegisterClassObject 需要 IClassFactory，
+/// 不是服务对象本身。
+/// </summary>
+[ComVisible(true)]
+public sealed class BrokerClassFactory : IClassFactory
+{
+    private readonly BrokerComServer _server;
+
+    public BrokerClassFactory(BrokerComServer server) => _server = server;
+
+    public int CreateInstance(IntPtr pUnkOuter, ref Guid riid, out IntPtr ppvObject)
+    {
+        if (pUnkOuter != IntPtr.Zero)
+        {
+            ppvObject = IntPtr.Zero;
+            return unchecked((int)0x80040004); // CLASS_E_NOAGGREGATION
+        }
+        ppvObject = Marshal.GetIUnknownForObject(_server);
+        // QueryInterface for the requested IID
+        int hr = Marshal.QueryInterface(ppvObject, ref riid, out IntPtr ppv);
+        Marshal.Release(ppvObject);
+        if (hr >= 0) ppvObject = ppv;
+        return hr;
+    }
+
+    public int LockServer(bool fLock) => 0; // S_OK
+}
+
+[ComVisible(true)]
+[Guid("00000001-0000-0000-C000-000000000046")] // IID_IClassFactory
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IClassFactory
+{
+    int CreateInstance(IntPtr pUnkOuter, ref Guid riid, out IntPtr ppvObject);
+    int LockServer(bool fLock);
+}
+
+/// <summary>
 /// Broker COM 服务器 — 实现所有三个接口。
 /// 作为 COM Local Server 运行（独立进程），btop4win 通过 CoCreateInstance 连接。
 /// </summary>
@@ -259,7 +297,8 @@ public sealed class BrokerComServer : IBrokerService, IBrokerProcessService, IBr
     // ================================================================
 
     /// <summary>
-    /// 注册 Broker 为 COM Local Server（写入 HKCR\CLSID\...\LocalServer32）。
+    /// 注册 Broker 为 COM Local Server（写入 HKCR\CLSID\...\LocalServer32 + 接口注册）。
+    /// 接口注册 (HKCR\Interface\{IID}) 是跨进程 COM 的必要条件。
     /// 需要管理员权限。
     /// </summary>
     public static void RegisterComServer()
@@ -269,14 +308,18 @@ public sealed class BrokerComServer : IBrokerService, IBrokerProcessService, IBr
             string clsid = BrokerGuids.BrokerServiceClsid;
             string exePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName ?? "";
 
+            // CLSID + LocalServer32
             string clsidKey = $@"CLSID\{{{clsid}}}";
-            string localServerKey = $@"{clsidKey}\LocalServer32";
-
             using var key = Registry.ClassesRoot.CreateSubKey(clsidKey);
             key?.SetValue("", "SysMonBroker Service");
 
-            using var serverKey = Registry.ClassesRoot.CreateSubKey(localServerKey);
+            using var serverKey = Registry.ClassesRoot.CreateSubKey($"{clsidKey}\\LocalServer32");
             serverKey?.SetValue("", $"\"{exePath}\" --com-server");
+
+            // 接口注册 — InterfaceIsDual 使用 COM 内建 IDispatch 封送，不需要 ProxyStubClsid32
+            RegisterInterface(BrokerGuids.IBrokerServiceIid, "IBrokerService");
+            RegisterInterface(BrokerGuids.IBrokerProcessServiceIid, "IBrokerProcessService");
+            RegisterInterface(BrokerGuids.IBrokerSensorServiceIid, "IBrokerSensorService");
 
             Log($"COM registered: {{{clsid}}} -> {exePath}");
         }
@@ -286,16 +329,25 @@ public sealed class BrokerComServer : IBrokerService, IBrokerProcessService, IBr
         }
     }
 
-    /// <summary>取消注册</summary>
+    /// <summary>取消注册（CLSID + 接口）</summary>
     public static void UnregisterComServer()
     {
         try
         {
-            string clsidKey = $@"CLSID\{{{BrokerGuids.BrokerServiceClsid}}}";
-            Registry.ClassesRoot.DeleteSubKeyTree(clsidKey, false);
+            Registry.ClassesRoot.DeleteSubKeyTree($@"CLSID\{{{BrokerGuids.BrokerServiceClsid}}}", false);
+            Registry.ClassesRoot.DeleteSubKeyTree($@"Interface\{{{BrokerGuids.IBrokerServiceIid}}}", false);
+            Registry.ClassesRoot.DeleteSubKeyTree($@"Interface\{{{BrokerGuids.IBrokerProcessServiceIid}}}", false);
+            Registry.ClassesRoot.DeleteSubKeyTree($@"Interface\{{{BrokerGuids.IBrokerSensorServiceIid}}}", false);
             Log("COM unregistered");
         }
         catch { }
+    }
+
+    private static void RegisterInterface(string iid, string name)
+    {
+        string ifaceKey = $@"Interface\{{{iid}}}";
+        using var key = Registry.ClassesRoot.CreateSubKey(ifaceKey);
+        key?.SetValue("", name);
     }
 
     public void Dispose()

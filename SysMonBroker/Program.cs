@@ -196,7 +196,7 @@ internal static class Program
                 }
 
                 Guid brokerClsid = new(BrokerGuids.BrokerServiceClsid);
-                IntPtr pUnk = Marshal.GetIUnknownForObject(comServer);
+                IntPtr pUnk = Marshal.GetIUnknownForObject(new BrokerClassFactory(comServer));
                 int hr = CoRegisterClassObject(
                     ref brokerClsid,
                     pUnk,
