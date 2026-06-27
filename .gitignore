@@ -33,3 +33,11 @@ SysMonCmdPal/Generated Files/
 
 # Generated files
 *.g.cs
+
+# DevMode marker (local only, never commit)
+.devmode_marker
+.devmode_on
+.devmode
+
+# DevMode (developer-only, never commit)
+.devmode_marker

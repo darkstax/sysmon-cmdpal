@@ -5,7 +5,9 @@
 
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32;
+using SysMonBroker.Logging;
 
 namespace SysMonBroker.COM;
 
@@ -54,7 +56,7 @@ public interface IClassFactory
 [ComVisible(true)]
 [Guid(BrokerGuids.BrokerServiceClsid)]
 [ClassInterface(ClassInterfaceType.None)]
-public sealed class BrokerComServer : IBrokerService, IBrokerProcessService, IBrokerSensorService
+public sealed class BrokerComServer : IBrokerService
 {
     private readonly ProcessCollector _processCollector = new();
     private BrokerProcessEntry[]? _cachedProcesses;
@@ -75,37 +77,81 @@ public sealed class BrokerComServer : IBrokerService, IBrokerProcessService, IBr
     public static long LastComCallTicks => _lastComCallTicks;
 
     // ---- 安全：硬编码 SHA256 + SSH 签名 devmode + 认证状态 ----
+    // RELEASE 模式: DevMode 不可用。
+    //   部署前必须把目标 btop.exe 的 SHA256 填入 BtopExeHash 常量,
+    //   否则 release 构建会拒绝所有客户端认证。
+    // DEV 模式: 开发者通过 --devmode-on 开启 DevMode → 运行 btop4win --register-broker
+    //   → broker 将 btop4win 的 hash 追加到 registered_hashes.txt (不落仓库, 跨进程共享)
+    //   → 关闭 DevMode 后已注册的 hash 继续有效
     private const string BtopExeHash = "11b38346e3bbe0b417e4b7fb1c7f5ee123eb9b5a737537ece86cfdc58e7c49dc";
     private bool _authenticated;
 
+    // 已注册 hash 存储在 %LOCALAPPDATA%\SysMonCmdPal\registered_hashes.txt (每行一个 hash)
+    // 不落仓库, 跨 standalone + COM server 进程共享
+    // 用 USERPROFILE 而非 LOCALAPPDATA, 因 COM server 进程的 LOCALAPPDATA 可能不一致
+    private static readonly string RegisteredHashesPath = Path.Combine(
+        Environment.GetEnvironmentVariable("USERPROFILE") ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        "AppData", "Local", "SysMonCmdPal", "registered_hashes.txt");
+    private static readonly object _hashLock = new();
+
     // ================================================================
-    // IBrokerService
+    // IBrokerService (flat — 所有方法直接在此接口上)
     // ================================================================
 
-    public IBrokerProcessService GetProcessService() { TouchCom(); return this; }
-    public IBrokerSensorService GetSensorService() { TouchCom(); return this; }
     public bool IsAlive() { TouchCom(); return true; }
     public string GetVersion() { TouchCom(); return "SysMonBroker v2.2 (COM)"; }
 
-    // ================================================================
-    // IBrokerProcessService
-    // ================================================================
-
-    public BrokerProcessEntry[] GetProcesses()
+    // ---- 进程 ----
+    public byte[] GetProcesses()
     {
         TouchCom();
         RequireAuth();
         lock (_processLock)
         {
-            // 缓存 2 秒内的结果，避免多个客户端频繁调用
             if (_cachedProcesses == null ||
                 (DateTime.UtcNow - _lastProcessRefresh).TotalSeconds > 2)
             {
                 _cachedProcesses = _processCollector.Collect();
                 _lastProcessRefresh = DateTime.UtcNow;
             }
-            return _cachedProcesses;
+            if (_cachedProcesses == null) return [];
+            using var ms = new MemoryStream(_cachedProcesses.Length * 1608);
+            Span<byte> nameBuf = stackalloc byte[260];
+            Span<byte> cmdBuf = stackalloc byte[1024];
+            Span<byte> userBuf = stackalloc byte[256];
+            foreach (var p in _cachedProcesses)
+            {
+                WriteLE32(ms, p.Pid); WriteLE32(ms, p.ParentPid); WriteLE32(ms, p.Threads);
+                WriteFixed(ms, p.Name, nameBuf);
+                WriteFixed(ms, p.CommandLine, cmdBuf);
+                WriteFixed(ms, p.UserName, userBuf);
+                WriteLE64(ms, (ulong)p.PrivateMemoryBytes);
+                WriteLE64(ms, (ulong)BitConverter.DoubleToUInt64Bits(p.CpuPercent));
+                WriteLE64(ms, (ulong)p.CreationTime);
+                WriteLE64(ms, (ulong)p.KernelTime);
+                WriteLE64(ms, (ulong)p.UserTime);
+                WriteLE64(ms, (ulong)p.IoReadBytes);
+                WriteLE64(ms, (ulong)p.IoWriteBytes);
+            }
+            return ms.ToArray();
         }
+    }
+
+    private static void WriteLE32(MemoryStream ms, uint v) {
+        ms.WriteByte((byte)v); ms.WriteByte((byte)(v>>8)); ms.WriteByte((byte)(v>>16)); ms.WriteByte((byte)(v>>24));
+    }
+    private static void WriteLE64(MemoryStream ms, ulong v) {
+        ms.WriteByte((byte)v); ms.WriteByte((byte)(v>>8)); ms.WriteByte((byte)(v>>16)); ms.WriteByte((byte)(v>>24));
+        ms.WriteByte((byte)(v>>32)); ms.WriteByte((byte)(v>>40)); ms.WriteByte((byte)(v>>48)); ms.WriteByte((byte)(v>>56));
+    }
+    private static void WriteFixed(MemoryStream ms, string s, Span<byte> buf)
+    {
+        buf.Clear();
+        if (!string.IsNullOrEmpty(s))
+        {
+            int len = Encoding.UTF8.GetBytes(s, buf[..^1]);
+        }
+        ms.Write(buf);
     }
 
     public int GetProcessCount()
@@ -182,31 +228,51 @@ public sealed class BrokerComServer : IBrokerService, IBrokerProcessService, IBr
         TouchCom();
         try
         {
-            // DevMode: SSH 签名验证 → 跳过 hash 检查
+            // 截断到 64 字符 (btop 侧 BSTR 可能带 null terminator 导致 65 字符)
+            string hashLower = (exeHashHex ?? "").ToLowerInvariant().TrimEnd('\0')[..Math.Min(64, (exeHashHex ?? "").TrimEnd('\0').Length)];
+
+            // DevMode: 接受 + 自动注册 hash 到文件 (供 DevMode 关闭后继续使用)
             if (DevModeVerifier.IsDevModeActive())
             {
+                if (hashLower.Length == 64)
+                {
+                    try
+                    {
+                        Directory.CreateDirectory(Path.GetDirectoryName(RegisteredHashesPath)!);
+                        File.AppendAllText(RegisteredHashesPath, hashLower + "\n");
+                        Log($"Hash written to file: {RegisteredHashesPath}");
+                    }
+                    catch (Exception ex) { Log($"Hash file write failed: {ex.Message}"); }
+                }
                 _authenticated = true;
-                Log($"Auth OK (devmode): PID {clientPid} — SSH signature verified");
+                Log($"Auth OK (devmode): PID {clientPid} — hash registered ({hashLower[..Math.Min(8, hashLower.Length)]}...)");
                 return 0;
             }
 
-            // 验证 hash 格式
-            if (string.IsNullOrEmpty(exeHashHex) || exeHashHex.Length != 64)
+            // 已注册 hash (DevMode 期间注册的, 关闭后仍有效, 跨进程共享)
+            if (hashLower.Length == 64 && IsHashRegistered(hashLower))
             {
-                Log($"Auth DENIED: PID {clientPid} — invalid hash format");
+                _authenticated = true;
+                Log($"Auth OK (registered): PID {clientPid} — hash in registered file");
+                return 0;
+            }
+
+            // 硬编码 hash (release 模式唯一认证路径)
+            if (hashLower.Length != 64)
+            {
+                Log($"Auth DENIED: PID {clientPid} — invalid hash format (len={hashLower.Length})");
                 return 1;
             }
 
-            // 硬编码 hash 比对
-            if (!exeHashHex.Equals(BtopExeHash, StringComparison.OrdinalIgnoreCase))
+            if (!hashLower.Equals(BtopExeHash, StringComparison.OrdinalIgnoreCase))
             {
                 Log($"Auth DENIED: PID {clientPid} — hash mismatch " +
-                    $"(claimed={exeHashHex[..8]}..., expected={BtopExeHash[..8]}...)");
+                    $"(claimed={hashLower[..8]}..., expected={BtopExeHash[..8]}...)");
                 return 1;
             }
 
             _authenticated = true;
-            Log($"Auth OK: PID {clientPid} — hash matches");
+            Log($"Auth OK (hardcoded): PID {clientPid} — hash matches");
             return 0;
         }
         catch (Exception ex)
@@ -228,8 +294,48 @@ public sealed class BrokerComServer : IBrokerService, IBrokerProcessService, IBr
         }
     }
 
+    // ---- 已注册 hash 文件存储 (跨进程共享) ----
+
+    private static void RegisterHashToFile(string hashLower)
+    {
+        lock (_hashLock)
+        {
+            try
+            {
+                string? dir = Path.GetDirectoryName(RegisteredHashesPath);
+                Log($"RegisterHashToFile: path={RegisteredHashesPath}, dir={dir}, hash={hashLower[..8]}");
+                if (dir != null) Directory.CreateDirectory(dir);
+                var existing = File.Exists(RegisteredHashesPath)
+                    ? File.ReadAllLines(RegisteredHashesPath) : [];
+                if (!existing.Contains(hashLower))
+                {
+                    File.AppendAllText(RegisteredHashesPath, hashLower + "\n");
+                    Log($"RegisterHashToFile: written OK ({hashLower[..8]}...)");
+                }
+                else
+                {
+                    Log($"RegisterHashToFile: already exists ({hashLower[..8]}...)");
+                }
+            }
+            catch (Exception ex) { Log($"RegisterHashToFile error: {ex.Message}"); }
+        }
+    }
+
+    private static bool IsHashRegistered(string hashLower)
+    {
+        lock (_hashLock)
+        {
+            try
+            {
+                if (!File.Exists(RegisteredHashesPath)) return false;
+                return File.ReadAllLines(RegisteredHashesPath).Contains(hashLower);
+            }
+            catch { return false; }
+        }
+    }
+
     // ================================================================
-    // IBrokerSensorService
+    // IBrokerService 传感器方法
     // ================================================================
 
     public double GetCpuTemperature()
@@ -246,11 +352,19 @@ public sealed class BrokerComServer : IBrokerService, IBrokerProcessService, IBr
         return result?.Source ?? "None";
     }
 
+    public double GetCpuClock()
+    {
+        TouchCom();
+        return 0;
+    }
+
     public int GetGpuCount()
     {
         TouchCom();
         var gpus = GpuProvider?.Invoke();
-        return gpus?.Count ?? 0;
+        int count = gpus?.Count ?? 0;
+        Log($"GetGpuCount() = {count}");
+        return count;
     }
 
     public string GetGpuName(int index)
@@ -258,6 +372,7 @@ public sealed class BrokerComServer : IBrokerService, IBrokerProcessService, IBr
         TouchCom();
         var gpus = GpuProvider?.Invoke();
         if (gpus == null || index < 0 || index >= gpus.Count) return "";
+        Log($"GetGpuName({index}) = {gpus[index].Name}");
         return gpus[index].Name;
     }
 
@@ -265,8 +380,10 @@ public sealed class BrokerComServer : IBrokerService, IBrokerProcessService, IBr
     {
         TouchCom();
         var gpus = GpuProvider?.Invoke();
-        if (gpus == null || index < 0 || index >= gpus.Count) return -1;
-        return gpus[index].TempCelsius;
+        if (gpus == null || index < 0 || index >= gpus.Count) { Log($"GetGpuTemperature({index}) = -1 (gpus={gpus?.Count ?? 0})"); return -1; }
+        double t = gpus[index].TempCelsius;
+        Log($"GetGpuTemperature({index}) = {t}");
+        return t;
     }
 
     public double GetGpuUsage(int index)
@@ -316,10 +433,8 @@ public sealed class BrokerComServer : IBrokerService, IBrokerProcessService, IBr
             using var serverKey = Registry.ClassesRoot.CreateSubKey($"{clsidKey}\\LocalServer32");
             serverKey?.SetValue("", $"\"{exePath}\" --com-server");
 
-            // 接口注册 — InterfaceIsDual 使用 COM 内建 IDispatch 封送，不需要 ProxyStubClsid32
+            // 接口注册 — InterfaceIsDual 使用 OLE Automation 通用封送（PSOAInterface）
             RegisterInterface(BrokerGuids.IBrokerServiceIid, "IBrokerService");
-            RegisterInterface(BrokerGuids.IBrokerProcessServiceIid, "IBrokerProcessService");
-            RegisterInterface(BrokerGuids.IBrokerSensorServiceIid, "IBrokerSensorService");
 
             Log($"COM registered: {{{clsid}}} -> {exePath}");
         }
@@ -336,8 +451,6 @@ public sealed class BrokerComServer : IBrokerService, IBrokerProcessService, IBr
         {
             Registry.ClassesRoot.DeleteSubKeyTree($@"CLSID\{{{BrokerGuids.BrokerServiceClsid}}}", false);
             Registry.ClassesRoot.DeleteSubKeyTree($@"Interface\{{{BrokerGuids.IBrokerServiceIid}}}", false);
-            Registry.ClassesRoot.DeleteSubKeyTree($@"Interface\{{{BrokerGuids.IBrokerProcessServiceIid}}}", false);
-            Registry.ClassesRoot.DeleteSubKeyTree($@"Interface\{{{BrokerGuids.IBrokerSensorServiceIid}}}", false);
             Log("COM unregistered");
         }
         catch { }
@@ -348,6 +461,10 @@ public sealed class BrokerComServer : IBrokerService, IBrokerProcessService, IBr
         string ifaceKey = $@"Interface\{{{iid}}}";
         using var key = Registry.ClassesRoot.CreateSubKey(ifaceKey);
         key?.SetValue("", name);
+
+        // 注册 OLE Automation 通用封送器（PSOAInterface），使 SCM 能在跨进程封送接口
+        using var psKey = Registry.ClassesRoot.CreateSubKey($@"{ifaceKey}\ProxyStubClsid32");
+        psKey?.SetValue("", "{00020420-0000-0000-C000-000000000046}");
     }
 
     public void Dispose()
@@ -355,16 +472,5 @@ public sealed class BrokerComServer : IBrokerService, IBrokerProcessService, IBr
         _processCollector.Dispose();
     }
 
-    private static void Log(string msg)
-    {
-        try
-        {
-            var path = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "SysMonCmdPal", "broker.log");
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.AppendAllText(path, $"{DateTime.Now:HH:mm:ss.fff} [COM] {msg}\n");
-        }
-        catch { }
-    }
+    private static void Log(string msg) => BrokerLogger.Log("COM", msg);
 }

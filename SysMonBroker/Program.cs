@@ -9,15 +9,17 @@
 //   SysMonBroker.exe --com-server     — COM server mode (launched by CoCreateInstance)
 //   SysMonBroker.exe --register       — register COM classes then exit
 //   SysMonBroker.exe --unregister     — unregister COM classes then exit
-//   SysMonBroker.exe --register-hash <path> — add exe SHA256 to COM whitelist
-//   SysMonBroker.exe --list-hashes    — show current COM whitelist
+//   SysMonBroker.exe --devmode-on     — enable DevMode at runtime (dev build + marker required)
+//   SysMonBroker.exe --devmode-off    — disable DevMode at runtime
 
 using System.IO.MemoryMappedFiles;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using SysMonBroker.COM;
 using SysMonBroker.IPC;
+using SysMonBroker.Logging;
 using SysMonBroker.Sensors;
 
 namespace SysMonBroker;
@@ -76,6 +78,11 @@ internal static class Program
             return 0;
         }
 
+        if (args.Contains("--devmode-on") || args.Contains("--devmode-off"))
+        {
+            return DevModeToggle(args.Contains("--devmode-on"));
+        }
+
         bool isComServer = args.Contains("--com-server");
         Log($"=== SysMonBroker v2.2 starting (mode={(isComServer ? "COM" : "standalone")}) ===");
 
@@ -95,70 +102,35 @@ internal static class Program
         {
             if (isComServer)
             {
-                // COM server mode: read sensor data from SHM (standalone Broker writes it)
-                // No LHM init needed — starts instantly and returns admin-grade data
                 Log("COM server mode — reading sensors from SharedMemory");
                 Log("Opening SharedMemory (read-only)...");
                 try
                 {
                     var mmf = MemoryMappedFile.OpenExisting(BrokerSharedMemory.MapName,
                         MemoryMappedFileRights.Read);
-                    // 读取 SHM 的 volatile state 到 COM server 的 volatile fields
-                    var readShm = () =>
-                    {
-                        using var acc = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
-                        // Magic check
-                        if (acc.ReadInt32(0) != BrokerSharedMemory.MagicValue)
-                            return;
-                        // CPU temp (offset 16)
-                        double cpuTemp = acc.ReadDouble(16);
-                        // CpuSource (offset 24, 32 bytes UTF-8)
-                        byte[] srcBuf = new byte[32];
-                        acc.ReadArray(24, srcBuf, 0, 32);
-                        string cpuSrc = Encoding.UTF8.GetString(srcBuf).TrimEnd('\0');
-                        // GpuCount (offset 56)
-                        int gpuCount = Math.Min(acc.ReadInt32(56), BrokerSharedMemory.MaxGpus);
-                        var gpus = new List<Sensors.GpuReading>();
-                        for (int i = 0; i < gpuCount; i++)
-                        {
-                            int bOff = 60 + i * 72;
-                            byte[] nameBuf = new byte[32];
-                            acc.ReadArray(bOff, nameBuf, 0, 32);
-                            string gName = Encoding.UTF8.GetString(nameBuf).TrimEnd('\0');
-                            double gTemp = acc.ReadDouble(bOff + 32);
-                            double gUsage = acc.ReadDouble(bOff + 40);
-                            double gMemUsed = acc.ReadDouble(bOff + 48);
-                            double gMemTotal = acc.ReadDouble(bOff + 56);
-                            gpus.Add(new Sensors.GpuReading(gName, gTemp, gUsage, gMemUsed, gMemTotal));
-                        }
-                        // Sensors (offset 360 count, 364 entries)
-                        int sensorCount = Math.Min(acc.ReadInt32(360), BrokerSharedMemory.MaxSensors);
-                        var sensors = new List<IPC.SensorEntry>();
-                        for (int i = 0; i < sensorCount; i++)
-                        {
-                            int sOff = 364 + i * 64;
-                            int tag = acc.ReadInt32(sOff);
-                            byte[] sNameBuf = new byte[32];
-                            acc.ReadArray(sOff + 4, sNameBuf, 0, 32);
-                            string sName = Encoding.UTF8.GetString(sNameBuf).TrimEnd('\0');
-                            double val = acc.ReadDouble(sOff + 36);
-                            byte[] unitBuf = new byte[16];
-                            acc.ReadArray(sOff + 44, unitBuf, 0, 16);
-                            string unit = Encoding.UTF8.GetString(unitBuf).TrimEnd('\0');
-                            int hwTag = acc.ReadInt32(sOff + 60);
-                            sensors.Add(new IPC.SensorEntry(tag, sName, val, unit, hwTag));
-                        }
-                        Volatile.Write(ref _lastCpuTemp, cpuTemp);
-                        _lastCpuSource = cpuSrc;
-                        _lastGpus = gpus;
-                        _lastSensors = sensors;
-                    };
+                    var eventHandle = EventWaitHandle.OpenExisting(BrokerSharedMemory.EventName);
                     Log($"SharedMemory: {BrokerSharedMemory.MapName} (read-only OK)");
-                    // Initial read
-                    readShm();
-                    // Background timer to read SHM every 2s
-                    var shmTimer = new System.Threading.Timer(_ => readShm(), null, 0, 2000);
-                    cts.Token.Register(() => shmTimer.Dispose());
+
+                    var shmThread = new Thread(() =>
+                    {
+                        byte[] srcBuf = new byte[32];
+                        byte[] nameBuf = new byte[32];
+                        byte[] sNameBuf = new byte[32];
+                        byte[] unitBuf = new byte[16];
+
+                        using var acc = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+                        ReadShm(acc, srcBuf, nameBuf, sNameBuf, unitBuf);
+
+                        while (!cts.Token.IsCancellationRequested)
+                        {
+                            eventHandle.WaitOne(3000);
+                            ReadShm(acc, srcBuf, nameBuf, sNameBuf, unitBuf);
+                        }
+                    })
+                    { IsBackground = true, Name = "ShmReader" };
+                    shmThread.Start();
+
+                    cts.Token.Register(() => eventHandle.Set());
                 }
                 catch (Exception ex)
                 {
@@ -226,10 +198,7 @@ internal static class Program
                 {
                     if (!isComServer && collector != null)
                     {
-                        // Standalone mode: read sensors, write SHM + JSON
-                        var (cpuTemp, cpuSource) = collector.ReadCpuTemp();
-                        var gpus = collector.ReadGpus();
-                        var sensors = collector.ReadAllSensors();
+                        var (cpuTemp, cpuSource, gpus, sensors) = collector.ReadAll();
 
                         Volatile.Write(ref _lastCpuTemp, cpuTemp);
                         _lastCpuSource = cpuSource;
@@ -297,9 +266,55 @@ internal static class Program
             collector?.Dispose();
             CoUninitialize();
             Log("=== SysMonBroker stopped ===");
+            BrokerLogger.Flush();
         }
 
         return 0;
+    }
+
+    // ---- SHM Reader (COM server mode) ----
+
+    private static void ReadShm(MemoryMappedViewAccessor acc,
+        byte[] srcBuf, byte[] nameBuf, byte[] sNameBuf, byte[] unitBuf)
+    {
+        if (acc.ReadInt32(0) != BrokerSharedMemory.MagicValue)
+            return;
+
+        double cpuTemp = acc.ReadDouble(16);
+        acc.ReadArray(24, srcBuf, 0, 32);
+        string cpuSrc = Encoding.UTF8.GetString(srcBuf).TrimEnd('\0');
+
+        int gpuCount = Math.Min(acc.ReadInt32(56), BrokerSharedMemory.MaxGpus);
+        var gpus = new List<Sensors.GpuReading>(gpuCount);
+        for (int i = 0; i < gpuCount; i++)
+        {
+            int bOff = 60 + i * 72;
+            acc.ReadArray(bOff, nameBuf, 0, 32);
+            string gName = Encoding.UTF8.GetString(nameBuf).TrimEnd('\0');
+            gpus.Add(new Sensors.GpuReading(gName,
+                acc.ReadDouble(bOff + 32), acc.ReadDouble(bOff + 40),
+                acc.ReadDouble(bOff + 48), acc.ReadDouble(bOff + 56)));
+        }
+
+        int sensorCount = Math.Min(acc.ReadInt32(360), BrokerSharedMemory.MaxSensors);
+        var sensors = new List<IPC.SensorEntry>(sensorCount);
+        for (int i = 0; i < sensorCount; i++)
+        {
+            int sOff = 364 + i * 64;
+            int tag = acc.ReadInt32(sOff);
+            acc.ReadArray(sOff + 4, sNameBuf, 0, 32);
+            string sName = Encoding.UTF8.GetString(sNameBuf).TrimEnd('\0');
+            double val = acc.ReadDouble(sOff + 36);
+            acc.ReadArray(sOff + 44, unitBuf, 0, 16);
+            string unit = Encoding.UTF8.GetString(unitBuf).TrimEnd('\0');
+            int hwTag = acc.ReadInt32(sOff + 60);
+            sensors.Add(new IPC.SensorEntry(tag, sName, val, unit, hwTag));
+        }
+
+        Volatile.Write(ref _lastCpuTemp, cpuTemp);
+        _lastCpuSource = cpuSrc;
+        _lastGpus = gpus;
+        _lastSensors = sensors;
     }
 
     // ---- JSON Snapshot ----
@@ -361,16 +376,41 @@ internal static class Program
         _ => $"Unknown({tag})",
     };
 
-    static void Log(string msg)
+    // --devmode-on / --devmode-off: 检查 dev build + marker, 然后创建/删除 .devmode_on 文件
+    // 用文件 flag 而非管道 IPC, 因 standalone 和 COM server 是不同进程, 需共享状态
+    static int DevModeToggle(bool enable)
     {
-        try
+        string? devRepoPath = Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyMetadataAttribute>()?.Value;
+
+        if (string.IsNullOrEmpty(devRepoPath))
         {
-            var path = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "SysMonCmdPal", "broker.log");
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.AppendAllText(path, $"{DateTime.Now:HH:mm:ss.fff} {msg}\n");
+            Console.Error.WriteLine("[-] Not a dev build (no DevRepoPath embedded)");
+            Console.Error.WriteLine("    Build with: dotnet build -p:Dev=true");
+            return 1;
         }
-        catch { }
+
+        string markerPath = Path.Combine(devRepoPath!, ".devmode_marker");
+        if (!File.Exists(markerPath))
+        {
+            Console.Error.WriteLine($"[-] Marker file not found: {markerPath}");
+            Console.Error.WriteLine("    Create it: touch .devmode_marker (in project dir, gitignored)");
+            return 1;
+        }
+
+        bool ok = DevModeVerifier.SetRuntimeOverride(enable);
+        if (ok)
+        {
+            Console.WriteLine($"[+] DevMode {(enable ? "ON" : "OFF")} — file flag updated");
+            Console.WriteLine($"    All broker processes (standalone + COM server) will read this on next call");
+            return 0;
+        }
+        else
+        {
+            Console.Error.WriteLine("[-] DevMode toggle failed");
+            return 1;
+        }
     }
+
+    static void Log(string msg) => BrokerLogger.Log(msg);
 }

@@ -1,16 +1,20 @@
 // SysMonBroker/COM/DevModeVerifier.cs
-// SSH 签名验证 .devmode 文件 (支持 RSA + Ed25519)
+// SSH 签名验证 .devmode 文件 (支持 RSA + Ed25519) + 编译期路径门控
 //
-// .devmode 生成 (开发者执行一次):
+// 安全模型:
+//   release 构建 (不带 -p:Dev): AssemblyMetadata 无 DevRepoPath → IsDevModeActive() 永远 false
+//   dev 构建 (-p:Dev=true): 内嵌编译时项目目录路径 → .devmode_marker 必须在该路径下
+//   攻击者拿到 dev build: 不知道内嵌路径 → 无法创建正确 marker → DevMode 不可激活
+//
+// 开发者启用 (一次性):
+//   cd sysmon-cmdpal/SysMonBroker
+//   dotnet build -p:Dev=true
+//   touch .devmode_marker                          # gitignore, 不提交
 //   echo -n "SysMonBroker.DevMode.v2.2" > /tmp/challenge
 //   ssh-keygen -Y sign -n devmode -f ~/.ssh/id_ed25519 /tmp/challenge
 //   cp /tmp/challenge.sig %LOCALAPPDATA%\SysMonCmdPal\.devmode
-//
-// 验证流程:
-//   1. 解析 SSHSIG 格式 → 提取公钥 + 签名
-//   2. 用公钥验证签名（RSA SHA256 / Ed25519）
-//   3. 匹配 → devmode 激活
 
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -21,9 +25,72 @@ public static class DevModeVerifier
 {
     private const string Challenge = "SysMonBroker.DevMode.v2.2";
     private const string DevModeFileName = ".devmode";
-    private const string SshsigMagic = "SSHSIGNATURE";
+    private const string MarkerFileName = ".devmode_marker";
+    private const string SshsigMagic = "SSHSIG";
+
+    // 编译期注入: -p:Dev=true 时 csproj 写入 AssemblyMetadata("DevRepoPath", 项目目录)
+    // release 构建无此 attribute → null → DevMode 永远禁用
+    private static readonly string? DevRepoPath = Assembly
+        .GetExecutingAssembly()
+        .GetCustomAttribute<AssemblyMetadataAttribute>()
+        ?.Value;
+
+    private static bool _cachedResult;
+    private static DateTime _cacheExpiry;
+    private static readonly object _cacheLock = new();
+    private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(60);
+
+    // 运行时开关: --devmode-on 创建 .devmode_on 文件, --devmode-off 删除
+    // 用文件而非内存变量, 因 standalone 和 COM server 是不同进程, 需共享状态
+    private static readonly string RuntimeFlagPath = DevRepoPath != null
+        ? Path.Combine(DevRepoPath, ".devmode_on") : "";
+
+    /// <summary>运行时开关 DevMode (由 Program.cs 的 --devmode-on/off 命令调用)。
+    /// 仅 dev build (DevRepoPath 存在) + marker 文件存在时允许设置。
+    /// 写文件 flag 而非内存变量, 使 standalone + COM server 进程共享状态。</summary>
+    public static bool SetRuntimeOverride(bool enabled)
+    {
+        if (string.IsNullOrEmpty(DevRepoPath)) return false;
+        if (!File.Exists(Path.Combine(DevRepoPath!, MarkerFileName))) return false;
+
+        try
+        {
+            if (enabled) File.WriteAllText(RuntimeFlagPath, DateTime.UtcNow.ToString("o"));
+            else if (File.Exists(RuntimeFlagPath)) File.Delete(RuntimeFlagPath);
+            lock (_cacheLock) { _cacheExpiry = DateTime.MinValue; }
+            return true;
+        }
+        catch { return false; }
+    }
 
     public static bool IsDevModeActive()
+    {
+        if (string.IsNullOrEmpty(DevRepoPath)) return false;
+
+        string markerPath = Path.Combine(DevRepoPath!, MarkerFileName);
+        if (!File.Exists(markerPath)) return false;
+
+        // 运行时开关: 文件 flag (--devmode-on 创建, --devmode-off 删除)
+        if (File.Exists(RuntimeFlagPath)) return true;
+
+        // SSH 签名文件 (替代方式: 预签名 .devmode)
+        lock (_cacheLock)
+        {
+            if (DateTime.UtcNow < _cacheExpiry)
+                return _cachedResult;
+        }
+
+        bool result = VerifyDevModeInternal();
+
+        lock (_cacheLock)
+        {
+            _cachedResult = result;
+            _cacheExpiry = DateTime.UtcNow + CacheTtl;
+        }
+        return result;
+    }
+
+    private static bool VerifyDevModeInternal()
     {
         try
         {
@@ -36,20 +103,17 @@ public static class DevModeVerifier
             string content = File.ReadAllText(devModePath).Trim();
             if (!content.Contains("BEGIN SSH SIGNATURE")) return false;
 
-            // 提取 base64 签名体（跳过 armor 头尾）
             string base64 = ExtractArmoredBase64(content);
             if (string.IsNullOrEmpty(base64)) return false;
 
             byte[] blob;
             try { blob = Convert.FromBase64String(base64); }
-            catch (FormatException) { return false; }
+            catch { return false; }
 
-            // 解析 SSHSIG 结构
-            var parsed = ParseSshsig(blob);
-            if (parsed == null) return false;
+            var data = ParseSshsig(blob);
+            if (data == null) return false;
 
-            // 根据公钥类型验证签名
-            return VerifySignature(parsed, Challenge);
+            return VerifySignature(data, Challenge);
         }
         catch
         {
@@ -91,8 +155,9 @@ public static class DevModeVerifier
     {
         int pos = 0;
 
-        // Magic: "SSHSIGNATURE"
-        string magic = ReadSshString(blob, ref pos);
+        if (pos + 6 > blob.Length) return null;
+        string magic = Encoding.ASCII.GetString(blob, pos, 6);
+        pos += 6;
         if (magic != SshsigMagic) return null;
 
         // Version: uint32
@@ -168,9 +233,9 @@ public static class DevModeVerifier
     /// <summary>重建 SSHSIG 签名数据</summary>
     private static byte[] BuildSignedData(string namespace_, string hashAlg, byte[] messageHash)
     {
-        // "SSHSIG" + namespace + reserved("") + hashAlg + messageHash
         using var ms = new MemoryStream();
-        WriteSshString(ms, "SSHSIGNATURE");
+        byte[] magicBytes = Encoding.ASCII.GetBytes(SshsigMagic);
+        ms.Write(magicBytes, 0, magicBytes.Length);
         WriteSshString(ms, namespace_);
         WriteSshBytes(ms, []); // reserved
         WriteSshString(ms, hashAlg);
@@ -214,8 +279,8 @@ public static class DevModeVerifier
 
             // BCRYPT_ECCPUBLIC_BLOB: magic(4) + keySize(4) + 32-byte key
             byte[] keyBlob = new byte[8 + 32];
-            // BCRYPT_ECCPUBLIC_BLOB magic: "ECCP" (0x50434345)
-            keyBlob[0] = 0x45; keyBlob[1] = 0x43; keyBlob[2] = 0x43; keyBlob[3] = 0x50;
+            // BCRYPT_ECDH_PUBLIC_GENERIC_MAGIC: "ECKP" (0x504B4345, little-endian)
+            keyBlob[0] = 0x45; keyBlob[1] = 0x43; keyBlob[2] = 0x4B; keyBlob[3] = 0x50;
             // key size = 32
             keyBlob[4] = 32; keyBlob[5] = 0; keyBlob[6] = 0; keyBlob[7] = 0;
             Array.Copy(publicKeyRaw, 0, keyBlob, 8, 32);

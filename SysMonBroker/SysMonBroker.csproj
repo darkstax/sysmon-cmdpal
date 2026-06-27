@@ -21,9 +21,20 @@
     <NoWarn>IL2026;IL2050</NoWarn>
   </PropertyGroup>
 
+  <!-- DevMode: -p:Dev=true 时编译器自动注入项目目录路径作为运行时门控。
+       release 构建不带 Dev, AssemblyMetadata 不存在, DevModeVerifier 永远返回 false。
+       开发者本地构建会内嵌本机路径, 攻击者不知道路径无法激活。 -->
+  <PropertyGroup>
+    <Dev Condition="'$(Dev)' == ''">false</Dev>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(Dev)' == 'true'">
+    <AssemblyMetadata Include="DevRepoPath" Value="$(MSBuildProjectDirectory)" />
+  </ItemGroup>
+
   <!-- LHM: sole hardware access layer (PawnIO kernel driver embedded as resources) -->
   <ItemGroup>
     <PackageReference Include="LibreHardwareMonitorLib" Version="0.9.6" />
+    <PackageReference Include="System.Management" Version="10.0.2" />
   </ItemGroup>
 
 </Project>

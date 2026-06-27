@@ -67,20 +67,13 @@ public struct BrokerSensorEntry
 
 // ---- COM 接口 ----
 
-/// <summary>Broker 主服务接口 — 入口点</summary>
+/// <summary>Broker 主服务接口 — 包含传感器和进程方法（无子服务，便于 IDispatch 调用）</summary>
 [ComVisible(true)]
 [Guid(BrokerGuids.IBrokerServiceIid)]
 [InterfaceType(ComInterfaceType.InterfaceIsDual)]
 public interface IBrokerService
 {
-    /// <summary>获取进程采集服务</summary>
-    [return: MarshalAs(UnmanagedType.Interface)]
-    IBrokerProcessService GetProcessService();
-
-    /// <summary>获取传感器数据服务</summary>
-    [return: MarshalAs(UnmanagedType.Interface)]
-    IBrokerSensorService GetSensorService();
-
+    // ---- 基础 ----
     /// <summary>Broker 进程是否存活</summary>
     [return: MarshalAs(UnmanagedType.Bool)]
     bool IsAlive();
@@ -88,6 +81,34 @@ public interface IBrokerService
     /// <summary>Broker 版本字符串</summary>
     [return: MarshalAs(UnmanagedType.BStr)]
     string GetVersion();
+
+    // ---- 进程 ----
+    /// <summary>获取当前所有进程快照（字节数组，btop 端直接解析为 BrokerProcessEntry[]）</summary>
+    [return: MarshalAs(UnmanagedType.SafeArray, SafeArraySubType = VarEnum.VT_UI1)]
+    byte[] GetProcesses();
+
+    /// <summary>获取进程数量</summary>
+    int GetProcessCount();
+
+    /// <summary>客户端身份认证（白名单机制：校验 btop.exe 文件 SHA256）</summary>
+    int Authenticate(uint clientPid, [MarshalAs(UnmanagedType.BStr)] string exeHashHex);
+
+    // ---- 传感器 ----
+    /// <summary>CPU 温度 (°C, -1=不可用)</summary>
+    double GetCpuTemperature();
+
+    /// <summary>CPU 最高核心频率 (MHz, 0=不可用)</summary>
+    double GetCpuClock();
+
+    /// <summary>指定 GPU 的温度 (°C)</summary>
+    double GetGpuTemperature(int index);
+
+    /// <summary>指定 GPU 的使用率 (%)</summary>
+    double GetGpuUsage(int index);
+
+    /// <summary>指定 GPU 的名称</summary>
+    [return: MarshalAs(UnmanagedType.BStr)]
+    string GetGpuName(int index);
 }
 
 /// <summary>进程采集服务 — btop4win 核心需求</summary>
