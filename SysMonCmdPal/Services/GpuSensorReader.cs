@@ -1,14 +1,16 @@
 // Copyright (c) 2026 SysMonCmdPal
-// GPU 读取器 — 用户可配置回退链。
+// GPU 读取器 — 商店安全版回退链，所有数据源均为用户态。
 //
 // 数据源:
-//   "Broker"      = Broker 命名管道 (最优先，数据最全)
-//   "ThermalZone" = ACPI 热区温度 (PerformanceCounter，仅温度)
 //   "HWiNFO"      = HWiNFO 共享内存 (最后兜底)
+//   "ThermalZone" = ACPI 热区温度 (PerformanceCounter，仅温度)
+//   "ADL"         = AMD ADL GPU 数据 (用户态 DLL)
+//   "LHM"         = LibreHardwareMonitor NuGet
 
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using SysMonCmdPal.Broker;
 
 namespace SysMonCmdPal;
 
@@ -28,6 +30,17 @@ internal static class GpuSensorReader
     /// </summary>
     public static List<GpuResult> ReadAll()
     {
+        // 优先使用 Broker COM 推送的数据
+        var brokerSnap = BrokerPushReceiver.Instance.Snapshot;
+        if (brokerSnap.IsFresh && brokerSnap.Gpus.Count > 0)
+        {
+            return brokerSnap.Gpus.Values
+                .Select(g => new GpuResult(g.Name, g.UsagePercent, g.Temperature,
+                    g.MemoryUsedMB, g.MemoryTotalMB, "Broker"))
+                .ToList();
+        }
+
+        // 回退到配置的传感器链
         var config = SensorChainConfig.Load();
 
         foreach (var source in config.GpuChain)
@@ -44,7 +57,6 @@ internal static class GpuSensorReader
                 if (filtered.Count > 0)
                     return filtered;
 
-                // 筛选后为空，继续下一个数据源
                 SensorLogger.ForceLog($"GPU: [{source}] GpuMode 筛选后无 GPU，继续回退");
             }
         }
@@ -68,9 +80,10 @@ internal static class GpuSensorReader
     {
         return source switch
         {
-            "Broker" => ReadFromBroker(),
-            "ThermalZone" => ReadFromThermalZone(),
             "HWiNFO" => ReadFromHwInfo(),
+            "ThermalZone" => ReadFromThermalZone(),
+            "ADL" => ReadFromAdl(),
+            "LHM" => ReadFromLhm(),
             _ => null,
         };
     }
@@ -83,7 +96,6 @@ internal static class GpuSensorReader
         switch (mode)
         {
             case GpuMode.DedicatedOnly:
-                // 仅保留独立显卡（过滤掉 Intel/AMD 集显关键词）
                 var dedicated = gpus.Where(g =>
                     g.Name.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase) ||
                     g.Name.Contains("GeForce", StringComparison.OrdinalIgnoreCase) ||
@@ -103,7 +115,6 @@ internal static class GpuSensorReader
                     SensorLogger.ForceLog($"GPU GpuMode.DedicatedOnly: {gpus.Count} → {dedicated.Count}");
                     return dedicated;
                 }
-                // 如果没有独立显卡，回退到全部
                 return gpus;
 
             case GpuMode.Auto:
@@ -119,10 +130,6 @@ internal static class GpuSensorReader
     // 3D 活跃度筛选
     // ================================================================
 
-    /// <summary>
-    /// 智能筛选: 部分卡有 3D 活动而另一部分没有 → 只返回有活动的;
-    /// 都有或都没有 → 全部返回。
-    /// </summary>
     private static List<GpuResult> FilterBy3DActivity(List<GpuResult> gpus)
     {
         if (gpus.Count <= 1) return gpus;
@@ -141,63 +148,55 @@ internal static class GpuSensorReader
     }
 
     // ================================================================
-    // Phase A: Broker 命名管道
+    // Phase A: LHM NuGet — 嵌入式传感器库
     // ================================================================
 
-    /// <summary>通过 Broker 命名管道 (cmd=4) 读取所有 GPU 数据。LHM 补充缺失的温度/使用率/显存。</summary>
-    private static List<GpuResult>? ReadFromBroker()
+    private static List<GpuResult>? ReadFromLhm()
     {
         try
         {
-            if (!BrokerClient.Instance.IsAvailable)
+            if (!LhmSensorService.Instance.IsAvailable)
                 return null;
 
-            var gpus = BrokerClient.Instance.ReadAllGpus();
-            if (gpus == null || gpus.Count == 0)
-                return null;
+            LhmSensorService.Instance.Refresh();
 
-            var results = gpus.Select(g => new GpuResult(
-                g.Name, g.UsagePercent, g.Temperature,
-                g.MemoryUsedMB, g.MemoryTotalMB, "Broker")).ToList();
+            var gpuNames = new HashSet<string>();
+            var results = new List<GpuResult>();
 
-            // LHM 补充缺失数据（NVAPI 只拿到名称，温度/使用率/显存需要 LHM 补）
-            SupplementFromLhm(results);
+            foreach (var reading in LhmSensorService.Instance.AllReadings)
+            {
+                if (reading.HardwareName == null) continue;
 
-            return results;
+                bool isGpu = reading.Category is SensorCategory.GpuTemp or SensorCategory.GpuLoad
+                    or SensorCategory.GpuClock or SensorCategory.GpuPower
+                    or SensorCategory.GpuMemory or SensorCategory.GpuFan
+                    or SensorCategory.GpuVoltage;
+
+                if (!isGpu) continue;
+
+                gpuNames.Add(reading.HardwareName);
+            }
+
+            foreach (var name in gpuNames)
+            {
+                double temp = ReadLhmField(name, SensorCategory.GpuTemp);
+                double load = ReadLhmField(name, SensorCategory.GpuLoad);
+                double memTotal = ReadLhmMemField(name, total: true);
+                double memUsed = ReadLhmMemField(name, total: false);
+
+                results.Add(new GpuResult(name, load, temp, memUsed, memTotal, "LHM"));
+            }
+
+            return results.Count > 0 ? results : null;
         }
         catch (Exception ex)
         {
-            SensorLogger.ForceLog($"GPU Broker 异常: {ex.Message}");
+            SensorLogger.ForceLog($"GPU LHM 异常: {ex.Message}");
             return null;
         }
     }
 
-    // ================================================================
-    // LHM 补充（填充 Broker 返回的 GPU 缺失数据）
-    // ================================================================
-
-    private static void SupplementFromLhm(List<GpuResult> gpus)
-    {
-        if (!LhmSensorService.Instance.IsAvailable) return;
-        LhmSensorService.Instance.Refresh();
-
-        for (int i = 0; i < gpus.Count; i++)
-        {
-            var g = gpus[i];
-            if (g.Temperature > 0 && g.UsagePercent >= 0 && g.MemoryTotalMB > 0)
-                continue; // 数据已完整
-
-            string src = g.Source == "Broker" ? "Broker+LHM" : g.Source;
-            gpus[i] = new GpuResult(g.Name,
-                g.UsagePercent < 0 ? ReadLhmGpuField(g.Name, SensorCategory.GpuLoad, "Core") : g.UsagePercent,
-                g.Temperature <= 0 ? ReadLhmGpuField(g.Name, SensorCategory.GpuTemp, "Core") : g.Temperature,
-                g.MemoryTotalMB <= 0 ? ReadLhmGpuMemory(g.Name, true) : g.MemoryTotalMB,
-                g.MemoryTotalMB <= 0 ? ReadLhmGpuMemory(g.Name, false) : g.MemoryUsedMB,
-                src);
-        }
-    }
-
-    private static double ReadLhmGpuField(string gpuName, SensorCategory cat, string sensorPattern)
+    private static double ReadLhmField(string gpuName, SensorCategory cat)
     {
         try
         {
@@ -213,7 +212,7 @@ internal static class GpuSensorReader
         catch { return -1; }
     }
 
-    private static double ReadLhmGpuMemory(string gpuName, bool total)
+    private static double ReadLhmMemField(string gpuName, bool total)
     {
         try
         {
@@ -232,7 +231,6 @@ internal static class GpuSensorReader
     // Phase B: ACPI 热区温度
     // ================================================================
 
-    /// <summary>通过 ACPI 热区 (PerformanceCounter) 读取 GPU 近似温度。</summary>
     private static List<GpuResult>? ReadFromThermalZone()
     {
         try
@@ -258,10 +256,9 @@ internal static class GpuSensorReader
     }
 
     // ================================================================
-    // Phase C: HWiNFO 共享内存（最后兜底）
+    // Phase C: HWiNFO 共享内存
     // ================================================================
 
-    /// <summary>通过 HWiNFO 共享内存读取 GPU 温度（最后兜底）。</summary>
     private static List<GpuResult>? ReadFromHwInfo()
     {
         try
@@ -278,6 +275,34 @@ internal static class GpuSensorReader
         catch (Exception ex)
         {
             SensorLogger.ForceLog($"GPU HWiNFO 异常: {ex.Message}");
+        }
+
+        return null;
+    }
+
+    // ================================================================
+    // Phase D: AMD ADL GPU
+    // ================================================================
+
+    private static List<GpuResult>? ReadFromAdl()
+    {
+        try
+        {
+            if (!AmdTempReader.Instance.IsAdlAvailable)
+                return null;
+
+            int temp = AmdTempReader.Instance.ReadGpuTempViaAdl();
+            if (temp > 0)
+            {
+                return
+                [
+                    new GpuResult("AMD GPU (ADL)", -1, temp, 0, 0, "ADL"),
+                ];
+            }
+        }
+        catch (Exception ex)
+        {
+            SensorLogger.ForceLog($"GPU ADL 异常: {ex.Message}");
         }
 
         return null;

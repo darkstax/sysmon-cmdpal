@@ -1,7 +1,7 @@
 // Copyright (c) 2026 SysMonCmdPal
 // 系统信息采集服务 — 使用 Win32 API (P/Invoke) 获取基础指标。
-// 温度和 GPU 数据委托给 LhmSensorService（PawnIO 驱动，免管理员）。
-// 回退链: LHM NuGet (NVAPI) → LHM WMI (外部进程) → AMD ADL (PMLOG) → HWiNFO 共享内存 → 不可用
+// 温度和 GPU 数据委托给 CpuSensorReader / GpuSensorReader（全部用户态，无 ring-0）。
+// 商店安全版回退链: HWiNFO → ADL → ThermalZone → LHM
 
 using System;
 using System.Diagnostics;
@@ -15,24 +15,20 @@ namespace SysMonCmdPal;
 /// <summary>传感器后端状态 — 表示当前使用哪个数据源</summary>
 public enum SensorBackend
 {
-    /// <summary>PawnIO Intel MSR (ring0 模块)</summary>
-    PawnMsr,
-    /// <summary>PawnIO AMD SMU (ring0 模块)</summary>
-    PawnSmu,
-    /// <summary>NVIDIA NVAPI (nvapi64.dll)</summary>
-    Nvapi,
-    /// <summary>AMD ADL (atiadlxx.dll) — GPU 数据</summary>
-    AdlGpu,
-    /// <summary>Intel IGCL (igcl.dll)</summary>
-    Igcl,
-    /// <summary>LibreHardwareMonitor (PawnIO 驱动)</summary>
-    Lhm,
-    /// <summary>LHM 外部进程 WMI Provider</summary>
-    LhmWmi,
-    /// <summary>AMD ADL PMLOG (atiadlxx.dll) — CPU 温度</summary>
-    AmdAdl,
-    /// <summary>HWiNFO 共享内存 (Global\HWiNFO_SENS_SM2)</summary>
+    /// <summary>Broker COM 推送（最精准）</summary>
+    Broker,
+    /// <summary>HWiNFO 共享内存 (Global\HWiNFO_SENS_SM2) — 精准</summary>
     HwInfo,
+    /// <summary>NVIDIA NVAPI (nvapi64.dll) — 用户态 GPU 数据</summary>
+    Nvapi,
+    /// <summary>AMD ADL (atiadlxx.dll) — 用户态 CPU/GPU 数据</summary>
+    AmdAdl,
+    /// <summary>Intel IGCL (igcl.dll) — 用户态 GPU 数据</summary>
+    Igcl,
+    /// <summary>LibreHardwareMonitor NuGet — 传感器库</summary>
+    Lhm,
+    /// <summary>Windows ACPI 热区 (PerformanceCounter)</summary>
+    ThermalZone,
     /// <summary>无可用传感器后端</summary>
     None,
 }
@@ -177,7 +173,7 @@ public class SystemInfoService
         ReadMemory(ref snapshot);
         ReadBattery(ref snapshot);
 
-        // 传感器回退链: LHM (PawnIO) → AMD ADL → HWiNFO → None
+        // 传感器回退链: HWiNFO → ADL → ThermalZone → LHM → None
         TryReadSensors(ref snapshot);
 
         Current = snapshot;
@@ -290,17 +286,30 @@ public class SystemInfoService
     }
 
     // ===== Network =====
-    /// <summary>读取所有活跃网络接口的字节计数。upload=true 返回已发送，false 返回已接收。</summary>
+    /// <summary>读取所有活跃物理网络接口的字节计数。upload=true 返回已发送，false 返回已接收。</summary>
     private static long ReadNetBytes(bool upload)
     {
         long total = 0;
         foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
         {
-            if (ni.OperationalStatus == OperationalStatus.Up)
-            {
-                var stats = ni.GetIPStatistics();
-                total += upload ? stats.BytesSent : stats.BytesReceived;
-            }
+            if (ni.OperationalStatus != OperationalStatus.Up)
+                continue;
+
+            // 只计算物理网络接口，排除虚拟接口
+            if (ni.NetworkInterfaceType is not
+                (NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211))
+                continue;
+
+            // 排除 Hyper-V / WSL2 / Docker 虚拟交换机
+            var desc = ni.Description ?? "";
+            if (desc.Contains("Hyper-V") || desc.Contains("vEthernet") ||
+                desc.Contains("WSL") || desc.Contains("Virtual") ||
+                desc.Contains("Loopback") || desc.Contains("Teredo") ||
+                desc.Contains("ISATAP"))
+                continue;
+
+            var stats = ni.GetIPStatistics();
+            total += upload ? stats.BytesSent : stats.BytesReceived;
         }
         return total;
     }
@@ -373,8 +382,7 @@ public class SystemInfoService
 
     // ============================================================
     // 传感器采集 — 委托给 CpuSensorReader / GpuSensorReader
-    // CPU: PawnIO MSR(Intel) / PawnIO SMU(AMD) → ADL(AMD) → LHM → HWiNFO
-    // GPU: NVAPI(NVIDIA) / ADL(AMD) / IGCL(Intel) → LHM → HWiNFO
+    // 全部用户态: HWiNFO → ADL → ThermalZone → LHM
     // ============================================================
 
     private static void TryReadSensors(ref SystemSnapshot snapshot)
@@ -387,14 +395,11 @@ public class SystemInfoService
             snapshot.CpuTemperature = cpuResult.Temperature;
             snapshot.Backend = cpuResult.Source switch
             {
-                "PawnIO_MSR" => SensorBackend.PawnMsr,
-                "PawnIO_SMU" => SensorBackend.PawnSmu,
-                "Broker_SMU" or "Broker_MSR" => SensorBackend.Lhm,
-                "LHM_HTTP" => SensorBackend.Lhm,
-                "ThermalZone" => SensorBackend.Lhm,
+                string s when s.StartsWith("Broker") => SensorBackend.Broker,
+                string s when s.StartsWith("HWiNFO") => SensorBackend.HwInfo,
+                "ThermalZone" => SensorBackend.ThermalZone,
                 string s when s.StartsWith("ADL") => SensorBackend.AmdAdl,
                 "LHM" => SensorBackend.Lhm,
-                string s when s.StartsWith("HWiNFO") => SensorBackend.HwInfo,
                 _ => SensorBackend.None,
             };
 

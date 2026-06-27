@@ -1,682 +1,416 @@
-// Copyright (c) 2026 SysMonCmdPal
-// SysMonBroker — 高精度硬件数据 Broker 服务
-// 以管理员权限运行，通过 PawnIO 驱动读取 SMU/MSR，
-// 通过命名管道向 MSIX 应用提供精准温度数据。
+// SysMonBroker — LHM thin-shell + Shared Memory IPC + COM Server (v2.1)
+// Runs as admin. Provides:
+//   1. SharedMemory v2 → Plugin (MSIX CmdPal extension)
+//   2. COM Local Server → btop4win (full process list + sensors, no admin needed)
+//   3. JSON snapshot → any consumer
 //
-// 协议:
-//   管道名: SysMonCmdPal
-//   请求: [byte cmd]  1=AMD Tctl  2=Intel Package Temp  3=CPU Power
-//   响应: [int32 status][double value][int32 source]
-//     status: 0=OK  1=NotAvailable  2=Timeout
-//     source: 1=SMU  2=MSR  0=None
+// Usage:
+//   SysMonBroker.exe                  — normal mode (SHM + COM + JSON)
+//   SysMonBroker.exe --com-server     — COM server mode (launched by CoCreateInstance)
+//   SysMonBroker.exe --register       — register COM classes then exit
+//   SysMonBroker.exe --unregister     — unregister COM classes then exit
+//   SysMonBroker.exe --devmode-on     — enable DevMode at runtime (dev build + marker required)
+//   SysMonBroker.exe --devmode-off    — disable DevMode at runtime
 
-using System;
-using System.ComponentModel;
-using System.IO;
-using System.IO.Pipes;
+using System.IO.MemoryMappedFiles;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
-using Microsoft.Win32.SafeHandles;
+using SysMonBroker.COM;
+using SysMonBroker.IPC;
+using SysMonBroker.Logging;
+using SysMonBroker.Sensors;
 
-namespace SysMonBroker
-{
+namespace SysMonBroker;
 
 internal static class Program
 {
-    private const string PipeName = "SysMonCmdPal";
-    private static readonly object _lock = new();
+    // ---- COM class object registration ----
+    [DllImport("ole32.dll")]
+    private static extern int CoRegisterClassObject(
+        ref Guid rclsid,
+        IntPtr pUnk,
+        uint dwClsContext, uint flags, out uint dwRegister);
+    [DllImport("ole32.dll")]
+    private static extern int CoRevokeClassObject(uint dwRegister);
+    [DllImport("ole32.dll")]
+    private static extern int CoInitializeEx(IntPtr pvReserved, uint dwCoInit);
+    [DllImport("ole32.dll")]
+    private static extern void CoUninitialize();
 
-    // Cached sensor data
-    private static double _amdTctl = -1;
-    private static double _intelTemp = -1;
-    private static double _cpuPower = -1;
-    private static DateTime _lastRefresh = DateTime.MinValue;
-    private static bool _isAmd;
-    private static bool _isIntel;
+    private const uint CLSCTX_LOCAL_SERVER = 4;
+    private const uint REGCLS_MULTIPLEUSE = 1;
+    private const uint COINIT_MULTITHREADED = 0;
 
-    private static PawnIOWrapper? _io;
-    private static bool _smuReady;
-    private static uint _smuTableVersion;
-    private static int _tjMax = 100;
-    private static int _tctlIndex = -1; // Auto-detected on first read
-    private static List<GpuData> _gpuData = new();
+    // ---- Sensor state (shared between main loop and COM server) ----
+    // Thread safety: writer (main loop) + reader (COM server on threadpool).
+    // Double reads/writes are not atomic, but torn reads of a double are benign
+    // for sensor data (at worst a transient garbage value that refreshes next cycle).
+    // No lock — sensor data is hot path and staleness is acceptable.
+    private static double _lastCpuTemp = -1;
+    private static volatile string _lastCpuSource = "None";
+    private static volatile List<GpuReading> _lastGpus = [];
+    private static volatile List<SensorEntry> _lastSensors = [];
 
     static int Main(string[] args)
     {
-        // 全局未捕获异常保护 — 记录崩溃日志再退出
-        AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         {
             var ex = e.ExceptionObject as Exception;
-            Log($"FATAL: Unhandled exception: {ex?.Message}");
-            Log($"FATAL: Stack: {ex?.StackTrace}");
-            if (ex?.InnerException != null)
-            {
-                Log($"FATAL: Inner: {ex.InnerException.Message}");
-            }
-            // 允许进程正常退出以记录日志
+            Log($"FATAL: {ex?.Message}\nFATAL: {ex?.StackTrace}");
             Thread.Sleep(500);
         };
 
-        Log("SysMonBroker starting...");
-
-        if (!InitPawnIO())
+        // ---- Command-line dispatch ----
+        if (args.Contains("--register"))
         {
-            Log("FATAL: PawnIO initialization failed. Exiting.");
-            return 1;
+            Log("Registering COM server...");
+            BrokerComServer.RegisterComServer();
+            Console.WriteLine("COM server registered.");
+            return 0;
+        }
+        if (args.Contains("--unregister"))
+        {
+            Log("Unregistering COM server...");
+            BrokerComServer.UnregisterComServer();
+            Console.WriteLine("COM server unregistered.");
+            return 0;
         }
 
-        Log($"Initialized: AMD={_isAmd} Intel={_isIntel} SMU={_smuReady}");
-
-        // Background refresh thread — updates PM table every 2 seconds
-        var refreshThread = new Thread(RefreshLoop)
+        if (args.Contains("--devmode-on") || args.Contains("--devmode-off"))
         {
-            IsBackground = true,
-            Name = "SensorRefresh"
-        };
-        refreshThread.Start();
-
-        // Main loop — serve named pipe requests
-        Log($"Listening on pipe: {PipeName}");
-        while (true)
-        {
-            try
-            {
-                var pipe = CreateOpenPipe(PipeName);
-                if (pipe == null)
-                {
-                    Log("CreateOpenPipe returned null, retrying in 1s");
-                    Thread.Sleep(1000);
-                    continue;
-                }
-
-                pipe.WaitForConnection();
-                ThreadPool.QueueUserWorkItem(_ => HandleClient(pipe));
-            }
-            catch (Exception ex)
-            {
-                Log($"Pipe accept error: {ex.Message}");
-                Thread.Sleep(1000);
-            }
+            return DevModeToggle(args.Contains("--devmode-on"));
         }
-    }
 
-    private static void HandleClient(NamedPipeServerStream pipe)
-    {
+        bool isComServer = args.Contains("--com-server");
+        Log($"=== SysMonBroker v2.2 starting (mode={(isComServer ? "COM" : "standalone")}) ===");
+
+        // ---- Self-register COM on first run ----
+        try { BrokerComServer.RegisterComServer(); }
+        catch (Exception ex) { Log($"COM auto-register: {ex.Message}"); }
+
+        using var cts = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+
+        SensorCollector? collector = null;
+        BrokerSharedMemory? shm = null;
+        BrokerComServer? comServer = null;
+        uint comCookie = 0;
+
         try
         {
-            var buf = new byte[1];
-            if (pipe.Read(buf, 0, 1) != 1) return;
-
-            byte cmd = buf[0];
-            double value = -1;
-            int status = 1; // NotAvailable
-            int source = 0;
-
-            lock (_lock)
+            if (isComServer)
             {
-                switch (cmd)
-                {
-                    case 1: // AMD Tctl/Tdie
-                        if (_isAmd && _amdTctl > 0)
-                        {
-                            value = _amdTctl;
-                            status = 0;
-                            source = 1;
-                        }
-                        break;
-                    case 2: // Intel Package Temp
-                        if (_isIntel && _intelTemp > 0)
-                        {
-                            value = _intelTemp;
-                            status = 0;
-                            source = 2;
-                        }
-                        break;
-                    case 3: // CPU Power (best effort)
-                        if (_cpuPower > 0)
-                        {
-                            value = _cpuPower;
-                            status = 0;
-                            source = _isAmd ? 1 : 2;
-                        }
-                        break;
-                    case 4: // GPU data — write variable-length blob then return
-                        lock (_lock)
-                        {
-                            using var ms = new MemoryStream();
-                            using var bw = new BinaryWriter(ms);
-                            bw.Write(_gpuData.Count);
-                            foreach (var gpu in _gpuData)
-                            {
-                                byte[] nameBytes = System.Text.Encoding.UTF8.GetBytes(gpu.Name + "\0");
-                                bw.Write(nameBytes.Length);
-                                bw.Write(nameBytes);
-                                bw.Write(gpu.Temperature);
-                                bw.Write(gpu.UsagePercent);
-                                bw.Write(gpu.MemoryUsedMB);
-                                bw.Write(gpu.MemoryTotalMB);
-                            }
-                            bw.Flush();
-                            var blob = ms.ToArray();
-                            pipe.Write(blob, 0, blob.Length);
-                            pipe.Flush();
-                        }
-                        return; // Skip standard 16-byte response
-                }
-            }
-
-            // Standard response for cmd 1-3: [int32 status][double value][int32 source]
-            var response = new byte[16];
-            BitConverter.TryWriteBytes(response.AsSpan(0, 4), status);
-            BitConverter.TryWriteBytes(response.AsSpan(4, 8), value);
-            BitConverter.TryWriteBytes(response.AsSpan(12, 4), source);
-            pipe.Write(response, 0, 16);
-            pipe.Flush();
-        }
-        catch (Exception ex)
-        {
-            Log($"Client error: {ex.Message}");
-        }
-        finally
-        {
-            try { pipe.Disconnect(); } catch { }
-            try { pipe.Dispose(); } catch { }
-        }
-    }
-
-    private static void RefreshLoop()
-    {
-        while (true)
-        {
-            try
-            {
-                lock (_lock)
-                {
-                    if (_isAmd && _smuReady)
-                    {
-                        double t = ReadAmdTctl();
-                        if (t > 0) _amdTctl = t;
-
-                        double p = ReadAmdPower();
-                        if (p > 0) _cpuPower = p;
-                    }
-                    else if (_isIntel && _io != null)
-                    {
-                        double t = ReadIntelTemp();
-                        if (t > 0) _intelTemp = t;
-                    }
-                    _lastRefresh = DateTime.UtcNow;
-                }
-
-                // GPU refresh (independent of CPU)
+                Log("COM server mode — reading sensors from SharedMemory");
+                Log("Opening SharedMemory (read-only)...");
                 try
                 {
-                    var raw = GpuReader.ReadAllGpus();
-                    lock (_lock)
+                    var mmf = MemoryMappedFile.OpenExisting(BrokerSharedMemory.MapName,
+                        MemoryMappedFileRights.Read);
+                    var eventHandle = EventWaitHandle.OpenExisting(BrokerSharedMemory.EventName);
+                    Log($"SharedMemory: {BrokerSharedMemory.MapName} (read-only OK)");
+
+                    var shmThread = new Thread(() =>
                     {
-                        _gpuData = GpuReader.FilterActiveGpus(raw);
-                    }
+                        byte[] srcBuf = new byte[32];
+                        byte[] nameBuf = new byte[32];
+                        byte[] sNameBuf = new byte[32];
+                        byte[] unitBuf = new byte[16];
+
+                        using var acc = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+                        ReadShm(acc, srcBuf, nameBuf, sNameBuf, unitBuf);
+
+                        while (!cts.Token.IsCancellationRequested)
+                        {
+                            eventHandle.WaitOne(3000);
+                            ReadShm(acc, srcBuf, nameBuf, sNameBuf, unitBuf);
+                        }
+                    })
+                    { IsBackground = true, Name = "ShmReader" };
+                    shmThread.Start();
+
+                    cts.Token.Register(() => eventHandle.Set());
                 }
                 catch (Exception ex)
                 {
-                    Log($"GPU refresh error: {ex.Message}");
+                    Log($"SharedMemory open failed: {ex.Message} — COM server will return stale data");
                 }
-            }
-            catch (Exception ex)
-            {
-                Log($"Refresh error: {ex.Message}");
-            }
-
-            Thread.Sleep(2000);
-        }
-    }
-
-    // ==================== Named Pipe with Open Security ====================
-
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern SafePipeHandle CreateNamedPipe(
-        string lpName, uint dwOpenMode, uint dwPipeMode,
-        uint nMaxInstances, uint nOutBufferSize, uint nInBufferSize,
-        uint nDefaultTimeOut, IntPtr lpSecurityAttributes);
-
-    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(
-        string StringSecurityDescriptor, uint StringSDRevision,
-        out IntPtr SecurityDescriptor, out UIntPtr Size);
-
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr LocalFree(IntPtr hMem);
-
-    private const uint PIPE_ACCESS_DUPLEX = 0x00000003;
-    private const uint FILE_FLAG_OVERLAPPED = 0x40000000;
-    private const uint PIPE_TYPE_BYTE = 0x00000000;
-    private const uint PIPE_READMODE_BYTE = 0x00000000;
-    private const uint PIPE_WAIT = 0x00000000;
-    private const uint PIPE_UNLIMITED_INSTANCES = 255;
-
-    /// <summary>
-    /// Creates a named pipe with an "Everyone" security descriptor so that
-    /// AppContainer-sandboxed MSIX apps can connect.
-    /// </summary>
-    private static NamedPipeServerStream? CreateOpenPipe(string name)
-    {
-        // SDDL: DACL allows Generic All to Everyone (WD)
-        const string sddl = "D:(A;;GA;;;WD)";
-        if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
-                sddl, 1, out IntPtr sd, out _))
-        {
-            Log($"ConvertSDDL failed: {Marshal.GetLastWin32Error()}");
-            return null;
-        }
-
-        var saPin = GCHandle.Alloc(
-            new byte[Marshal.SizeOf<SECURITY_ATTRIBUTES>()], GCHandleType.Pinned);
-        try
-        {
-            var sa = new SECURITY_ATTRIBUTES
-            {
-                nLength = (uint)Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
-                lpSecurityDescriptor = sd,
-                bInheritHandle = false,
-            };
-            Marshal.StructureToPtr(sa, saPin.AddrOfPinnedObject(), false);
-
-            var handle = CreateNamedPipe(
-                $@"\\.\pipe\{name}",
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                PIPE_UNLIMITED_INSTANCES,
-                4096, 4096, 0,
-                saPin.AddrOfPinnedObject());
-
-            if (handle.IsInvalid)
-            {
-                int err = Marshal.GetLastWin32Error();
-                Log($"CreateNamedPipe failed: error {err}");
-                return null;
-            }
-
-            return new NamedPipeServerStream(PipeDirection.InOut, true, false, handle);
-        }
-        finally
-        {
-            saPin.Free();
-            LocalFree(sd);
-        }
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct SECURITY_ATTRIBUTES
-    {
-        public uint nLength;
-        public IntPtr lpSecurityDescriptor;
-        public bool bInheritHandle;
-    }
-
-    // ==================== PawnIO Init ====================
-
-    private static bool InitPawnIO()
-    {
-        try
-        {
-            _io = new PawnIOWrapper();
-            var result = _io.Connect();
-            if (result != PawnIOWrapper.ConnectResult.OK)
-            {
-                Log($"PawnIO Connect: {result} (error {(int)result})");
-                return false;
-            }
-
-            // Detect CPU type and load appropriate module
-            bool isAmdCpu = IsAmdCpu();
-
-            if (isAmdCpu)
-            {
-                var data = LoadEmbeddedResource("RyzenSMU.bin");
-                if (data == null || !_io.LoadModule(data))
-                {
-                    Log("LoadModule RyzenSMU.bin failed");
-                    return false;
-                }
-
-                ulong[] ver = new ulong[1];
-                if (!_io.Execute("ioctl_get_smu_version", null, ver))
-                {
-                    Log("ioctl_get_smu_version failed");
-                    return false;
-                }
-
-                _smuTableVersion = (uint)ver[0];
-                _isAmd = true;
-                _smuReady = true;
-                Log($"AMD SMU ready, version=0x{_smuTableVersion:X8}");
             }
             else
             {
-                var data = LoadEmbeddedResource("IntelMSR.bin");
-                if (data == null || !_io.LoadModule(data))
-                {
-                    Log("LoadModule IntelMSR.bin failed");
-                    return false;
-                }
+                // Standalone mode: LHM sensor collection + SHM writer
+                Log("Creating SensorCollector (LHM Computer.Open)...");
+                collector = new SensorCollector();
+                Log($"SensorCollector ready. PawnIO: {(collector.PawnIoInstalled ? "installed" : "not installed — user-mode sensors only")}");
 
-                // Read TjMax
-                if (ReadMsr(0x1A2, out ulong target))
-                {
-                    int tj = (int)((target >> 24) & 0x7F);
-                    if (tj > 0 && tj < 150) _tjMax = tj;
-                }
-
-                _isIntel = true;
-                Log($"Intel MSR ready, TjMax={_tjMax}°C");
+                Log("Creating SharedMemory v2...");
+                shm = new BrokerSharedMemory();
+                Log($"SharedMemory: {BrokerSharedMemory.MapName} (size={BrokerSharedMemory.MapSize})");
             }
 
-            return true;
+            // ---- COM Server setup ----
+            comServer = new BrokerComServer();
+            comServer.CpuTempProvider = () => (Volatile.Read(ref _lastCpuTemp), _lastCpuSource);
+            comServer.GpuProvider = () => _lastGpus;
+            comServer.SensorProvider = () => _lastSensors;
+            Log("COM server ready (IBrokerService + IBrokerProcessService + IBrokerSensorService)");
+
+            // ---- Register COM class object with SCM (v2.2: standalone also registers) ----
+            // Standalone mode: register so CoCreateInstance connects directly (no --com-server launch needed)
+            // COM server mode: register for SCM-launched instances (no SHM, standalone handles that)
+            {
+                int initHr = CoInitializeEx(IntPtr.Zero, COINIT_MULTITHREADED);
+                if (initHr < 0)
+                {
+                    Log($"FATAL: CoInitializeEx failed with HRESULT 0x{initHr:X8}");
+                    return initHr;
+                }
+
+                Guid brokerClsid = new(BrokerGuids.BrokerServiceClsid);
+                IntPtr pUnk = Marshal.GetIUnknownForObject(new BrokerClassFactory(comServer));
+                int hr = CoRegisterClassObject(
+                    ref brokerClsid,
+                    pUnk,
+                    CLSCTX_LOCAL_SERVER,
+                    REGCLS_MULTIPLEUSE,
+                    out comCookie);
+                if (hr < 0)
+                {
+                    Log($"FATAL: CoRegisterClassObject failed with HRESULT 0x{hr:X8}");
+                    CoUninitialize();
+                    return hr;
+                }
+                Log($"CoRegisterClassObject OK, cookie={comCookie} (mode={(isComServer ? "COM" : "standalone")})");
+            }
+
+            // JSON snapshot path
+            var snapshotPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "SysMonCmdPal", "sensor_snapshot.json");
+
+            int cycle = 0;
+
+            while (!cts.Token.IsCancellationRequested)
+            {
+                cycle++;
+                try
+                {
+                    if (!isComServer && collector != null)
+                    {
+                        var (cpuTemp, cpuSource, gpus, sensors) = collector.ReadAll();
+
+                        Volatile.Write(ref _lastCpuTemp, cpuTemp);
+                        _lastCpuSource = cpuSource;
+                        _lastGpus = gpus;
+                        _lastSensors = sensors;
+
+                        shm?.Write(cpuTemp, cpuSource, gpus, sensors);
+
+                        if (cycle % 10 == 1)
+                            WriteSnapshot(snapshotPath, cpuTemp, cpuSource, gpus, sensors);
+
+                        if (cycle <= 3 || cycle % 30 == 1)
+                        {
+                            Log($"cycle={cycle} cpu={cpuTemp:F1}°C [{cpuSource}] gpus={gpus.Count} " +
+                                $"sensors={sensors.Count}");
+                            if (cycle <= 2)
+                            {
+                                foreach (var g in gpus)
+                                    Log($"  gpu: {g.Name} temp={g.TempCelsius:F1}°C load={g.UsagePercent:F0}%");
+                                var byCategory = sensors.GroupBy(s => s.Tag)
+                                    .OrderBy(g => g.Key)
+                                    .Select(g => $"{ShmTagName(g.Key)}:{g.Count()}");
+                                Log($"  sensors: {string.Join(", ", byCategory)}");
+                            }
+                        }
+                    }
+                    else if (isComServer && cycle <= 3)
+                    {
+                        // COM server: log periodically to show we're alive
+                        double temp = Volatile.Read(ref _lastCpuTemp);
+                        Log($"cycle={cycle} cpu={temp:F1}°C [{_lastCpuSource}] (from SHM)");
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    Log($"Cycle error: {ex.Message}");
+                }
+
+                // COM server mode: exit when idle for 10+ minutes
+                if (isComServer && cycle > 30 &&
+                    (DateTime.UtcNow.Ticks - BrokerComServer.LastComCallTicks) > TimeSpan.FromMinutes(10).Ticks)
+                {
+                    Log("COM server: idle for 10+ minutes, shutting down");
+                    break;
+                }
+
+                Thread.Sleep(2000);
+            }
         }
         catch (Exception ex)
         {
-            Log($"InitPawnIO exception: {ex.Message}");
-            return false;
+            Log($"FATAL: {ex.Message}\n{ex.StackTrace}");
+            return 1;
         }
-    }
-
-    // ==================== AMD SMU ====================
-
-    private static double ReadAmdTctl()
-    {
-        if (_io == null || !_smuReady) return -1;
-        try
+        finally
         {
-            ulong[] resolveOut = new ulong[2];
-            if (!_io.Execute("ioctl_resolve_pm_table", null, resolveOut)) return -1;
-            uint tableVer = (uint)resolveOut[0];
-
-            // Update PM table twice to get fresh values
-            _io.Execute("ioctl_update_pm_table", null, null);
-            Thread.Sleep(100);
-            if (!_io.Execute("ioctl_update_pm_table", null, null)) return -1;
-            Thread.Sleep(200);
-
-            ulong[] words = new ulong[64];
-            if (!_io.Execute("ioctl_read_pm_table", null, words)) return -1;
-
-            ReadOnlySpan<float> floats = MemoryMarshal.Cast<ulong, float>(words);
-
-            // Auto-detect Tctl index on first read
-            if (_tctlIndex < 0)
+            Log("Shutting down...");
+            if (comCookie != 0)
             {
-                _tctlIndex = DetectTctlIndex(floats, tableVer);
-                Log($"Auto-detected Tctl index: {_tctlIndex} (SMU v0x{tableVer:X8})");
-
-                // Dump PM table for diagnosis
-                DumpPmTable(floats);
+                CoRevokeClassObject(comCookie);
+                Log($"CoRevokeClassObject({comCookie}) OK");
             }
-
-            if (_tctlIndex < 0 || floats.Length <= _tctlIndex) return -1;
-
-            double temp = floats[_tctlIndex];
-            return temp > 0 && temp < 150 ? temp : -1;
+            comServer?.Dispose();
+            shm?.Dispose();
+            collector?.Dispose();
+            CoUninitialize();
+            Log("=== SysMonBroker stopped ===");
+            BrokerLogger.Flush();
         }
-        catch { return -1; }
+
+        return 0;
     }
 
-    /// <summary>
-    /// Auto-detect the Tctl/Tdie index in the PM table by measuring which
-    /// entry has the largest fluctuation between two reads.
-    /// Real temperature fluctuates; temperature walls (TjMax=95°C) are constant.
-    /// Falls back to known index table for known SMU versions.
-    /// </summary>
-    private static int DetectTctlIndex(ReadOnlySpan<float> floats, uint tableVer)
+    // ---- SHM Reader (COM server mode) ----
+
+    private static void ReadShm(MemoryMappedViewAccessor acc,
+        byte[] srcBuf, byte[] nameBuf, byte[] sNameBuf, byte[] unitBuf)
     {
-        // First, try known index table
-        int knownIdx = GetKnownTctlIndex(tableVer);
-        if (knownIdx >= 0)
+        if (acc.ReadInt32(0) != BrokerSharedMemory.MagicValue)
+            return;
+
+        double cpuTemp = acc.ReadDouble(16);
+        acc.ReadArray(24, srcBuf, 0, 32);
+        string cpuSrc = Encoding.UTF8.GetString(srcBuf).TrimEnd('\0');
+
+        int gpuCount = Math.Min(acc.ReadInt32(56), BrokerSharedMemory.MaxGpus);
+        var gpus = new List<Sensors.GpuReading>(gpuCount);
+        for (int i = 0; i < gpuCount; i++)
         {
-            float v = floats[knownIdx];
-            if (v > 20 && v < 90)
-                return knownIdx;
+            int bOff = 60 + i * 72;
+            acc.ReadArray(bOff, nameBuf, 0, 32);
+            string gName = Encoding.UTF8.GetString(nameBuf).TrimEnd('\0');
+            gpus.Add(new Sensors.GpuReading(gName,
+                acc.ReadDouble(bOff + 32), acc.ReadDouble(bOff + 40),
+                acc.ReadDouble(bOff + 48), acc.ReadDouble(bOff + 56)));
         }
 
-        // Second read to measure fluctuation
-        Thread.Sleep(300);
-        if (!_io!.Execute("ioctl_update_pm_table", null, null)) return knownIdx >= 0 ? knownIdx : 16;
-        Thread.Sleep(200);
-        ulong[] words2 = new ulong[64];
-        if (!_io.Execute("ioctl_read_pm_table", null, words2)) return knownIdx >= 0 ? knownIdx : 16;
-        ReadOnlySpan<float> floats2 = MemoryMarshal.Cast<ulong, float>(words2);
-
-        // Find index with largest fluctuation in 30-90°C range (CPU idle >30°C, TjMax >=90°C)
-        int bestIdx = 16; // fallback
-        float bestDelta = 0;
-        for (int i = 0; i < floats.Length && i < floats2.Length; i++)
+        int sensorCount = Math.Min(acc.ReadInt32(360), BrokerSharedMemory.MaxSensors);
+        var sensors = new List<IPC.SensorEntry>(sensorCount);
+        for (int i = 0; i < sensorCount; i++)
         {
-            if (floats[i] <= 30 || floats[i] >= 90) continue; // skip non-temperature fields and TjMax
-            float delta = Math.Abs(floats[i] - floats2[i]);
-            if (delta > bestDelta)
+            int sOff = 364 + i * 64;
+            int tag = acc.ReadInt32(sOff);
+            acc.ReadArray(sOff + 4, sNameBuf, 0, 32);
+            string sName = Encoding.UTF8.GetString(sNameBuf).TrimEnd('\0');
+            double val = acc.ReadDouble(sOff + 36);
+            acc.ReadArray(sOff + 44, unitBuf, 0, 16);
+            string unit = Encoding.UTF8.GetString(unitBuf).TrimEnd('\0');
+            int hwTag = acc.ReadInt32(sOff + 60);
+            sensors.Add(new IPC.SensorEntry(tag, sName, val, unit, hwTag));
+        }
+
+        Volatile.Write(ref _lastCpuTemp, cpuTemp);
+        _lastCpuSource = cpuSrc;
+        _lastGpus = gpus;
+        _lastSensors = sensors;
+    }
+
+    // ---- JSON Snapshot ----
+
+    private static void WriteSnapshot(string path, double cpuTemp, string cpuSource,
+        List<GpuReading> gpus, List<SensorEntry> sensors)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(path)!;
+            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+
+            using var sw = new StreamWriter(path + ".tmp");
+            sw.WriteLine("{");
+            sw.WriteLine($"  \"timestamp\": \"{DateTime.UtcNow:O}\",");
+            sw.WriteLine($"  \"cpu\": {{ \"temp\": {cpuTemp:F1}, \"source\": \"{cpuSource}\" }},");
+
+            sw.WriteLine("  \"gpus\": [");
+            for (int i = 0; i < gpus.Count; i++)
             {
-                bestDelta = delta;
-                bestIdx = i;
+                var g = gpus[i];
+                sw.Write($"    {{ \"name\": \"{JsonEscape(g.Name)}\", \"temp\": {g.TempCelsius:F1}, \"usage\": {g.UsagePercent:F1}, \"memUsed\": {g.MemUsedMB:F0}, \"memTotal\": {g.MemTotalMB:F0} }}");
+                if (i < gpus.Count - 1) sw.Write(",");
+                sw.WriteLine();
             }
-        }
+            sw.WriteLine("  ],");
 
-        if (bestDelta >= 0.2f)
-        {
-            Log($"PM table auto-scan: best_idx={bestIdx} delta={bestDelta:F2}°C");
-            return bestIdx;
-        }
-
-        // No fluctuation found, use known or fallback
-        return knownIdx >= 0 ? knownIdx : 16;
-    }
-
-    /// <summary>Known Tctl indices for specific SMU table versions</summary>
-    private static int GetKnownTctlIndex(uint tableVersion)
-    {
-        uint hi = tableVersion >> 16;
-        return hi switch
-        {
-            0x1E or 0x64 => 22,
-            0x37 or 0x3F or 0x40 or 0x4C or 0x5D or 0x65 => 16,
-            0x54 or 0x62 => 10,
-            0x45 => 17, // Dragon Range (Ryzen 9 7945HX) — confirmed via PM Table dump
-            _ => -1, // unknown — use auto-detect
-        };
-    }
-
-    /// <summary>Dump all PM table float values for diagnosis</summary>
-    private static void DumpPmTable(ReadOnlySpan<float> floats)
-    {
-        Log("=== PM Table dump ===");
-        for (int i = 0; i < Math.Min(floats.Length, 64); i++)
-        {
-            if (floats[i] != 0)
-                Log($"  [{i,2}] = {floats[i],8:F1}");
-        }
-        Log("=== End PM Table dump ===");
-    }
-
-    private static double ReadAmdPower()
-    {
-        if (_io == null || !_smuReady) return -1;
-        try
-        {
-            ulong[] resolveOut = new ulong[2];
-            if (!_io.Execute("ioctl_resolve_pm_table", null, resolveOut)) return -1;
-            uint tableVer = (uint)resolveOut[0];
-
-            ulong[] words = new ulong[64];
-            if (!_io.Execute("ioctl_read_pm_table", null, words)) return -1;
-
-            ReadOnlySpan<float> floats = MemoryMarshal.Cast<ulong, float>(words);
-            // SPL (Sustainable Power Limit) is always at index 0
-            return floats.Length > 0 && floats[0] > 0 ? floats[0] : -1;
-        }
-        catch { return -1; }
-    }
-
-    // ==================== Intel MSR ====================
-
-    private static double ReadIntelTemp()
-    {
-        if (_io == null) return -1;
-        try
-        {
-            if (!ReadMsr(0x19C, out ulong status)) return -1;
-            int readout = (int)((status >> 16) & 0x7F);
-            if (readout == 0) return -1;
-            return _tjMax - readout;
-        }
-        catch { return -1; }
-    }
-
-    private static bool ReadMsr(uint msr, out ulong value)
-    {
-        value = 0;
-        if (_io == null) return false;
-        var output = new ulong[1];
-        if (!_io.Execute("ioctl_read_msr", new ulong[] { msr }, output)) return false;
-        value = output[0];
-        return true;
-    }
-
-    // ==================== Helpers ====================
-
-    private static bool IsAmdCpu()
-    {
-        try
-        {
-            // Check processor vendor via environment variable or registry
-            var cpuName = Environment.GetEnvironmentVariable("PROCESSOR_IDENTIFIER") ?? "";
-            return cpuName.Contains("AMD", StringComparison.OrdinalIgnoreCase);
-        }
-        catch { return false; }
-    }
-
-    private static byte[]? LoadEmbeddedResource(string name)
-    {
-        var asm = Assembly.GetExecutingAssembly();
-        var fullName = asm.GetManifestResourceNames()
-            .FirstOrDefault(n => n.EndsWith(name, StringComparison.OrdinalIgnoreCase));
-        if (fullName == null) return null;
-        using var stream = asm.GetManifestResourceStream(fullName);
-        if (stream == null) return null;
-        using var ms = new MemoryStream();
-        stream.CopyTo(ms);
-        return ms.ToArray();
-    }
-
-    private static void Log(string msg)
-    {
-        try
-        {
-            var path = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "SysMonCmdPal", "broker.log");
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.AppendAllText(path, $"{DateTime.Now:HH:mm:ss.fff} {msg}\n");
-        }
-        catch { }
-    }
-} // class Program
-
-    // ==================== PawnIO Wrapper (self-contained) ====================
-
-    public sealed class PawnIOWrapper : IDisposable
-    {
-        private const int FN_LEN = 32;
-        private const uint DEV_TYPE = 41394u << 16;
-
-        private enum Ctl : uint
-        {
-            Load = DEV_TYPE | (0x821 << 2),
-            Execute = DEV_TYPE | (0x841 << 2),
-        }
-
-        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        static extern IntPtr CreateFile(string n, uint acc, uint share,
-            IntPtr sec, uint disp, uint fl, IntPtr tmpl);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        static extern bool CloseHandle(IntPtr h);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        static extern bool DeviceIoControl(IntPtr dev, Ctl code,
-            byte[] inB, uint inSz, byte[] outB, uint outSz, out uint ret, IntPtr ovl);
-
-        [DllImport("kernel32.dll", CallingConvention = CallingConvention.Winapi)]
-        static extern bool DeviceIoControl(Microsoft.Win32.SafeHandles.SafeFileHandle dev, Ctl code,
-            [In] byte[] inB, uint inSz, [Out] byte[] outB, uint outSz,
-            out uint ret, IntPtr ovl);
-
-        private IntPtr _raw = IntPtr.Zero;
-        private Microsoft.Win32.SafeHandles.SafeFileHandle? _safe;
-        private bool _loaded, _disposed;
-
-        public bool IsConnected => _raw != IntPtr.Zero && _raw.ToInt64() != -1;
-        public bool IsModuleLoaded => _loaded && _safe != null && !_safe.IsInvalid;
-
-        public enum ConnectResult { OK, NotInstalled, AccessDenied, OtherError }
-
-        public ConnectResult Connect()
-        {
-            if (IsConnected) return ConnectResult.OK;
-            const string path = @"\\?\GLOBALROOT\Device\PawnIO";
-            _raw = CreateFile(path, 0xC0000000u, 0x3, IntPtr.Zero, 3, 0, IntPtr.Zero);
-            if (_raw == IntPtr.Zero || _raw.ToInt64() == -1)
+            sw.WriteLine("  \"sensors\": [");
+            for (int i = 0; i < sensors.Count; i++)
             {
-                int err = Marshal.GetLastWin32Error();
-                _raw = IntPtr.Zero;
-                return err switch
-                {
-                    2 or 3 => ConnectResult.NotInstalled,
-                    5 => ConnectResult.AccessDenied,
-                    _ => ConnectResult.OtherError,
-                };
+                var s = sensors[i];
+                sw.Write($"    {{ \"tag\": {s.Tag}, \"cat\": \"{ShmTagName(s.Tag)}\", \"name\": \"{JsonEscape(s.Name)}\", \"value\": {s.Value:F2}, \"unit\": \"{s.Unit}\" }}");
+                if (i < sensors.Count - 1) sw.Write(",");
+                sw.WriteLine();
             }
-            return ConnectResult.OK;
-        }
+            sw.WriteLine("  ]");
+            sw.WriteLine("}");
+            sw.Flush();
 
-        public bool LoadModule(byte[] data)
-        {
-            if (!IsConnected || data == null || data.Length == 0) return false;
-            bool ok = DeviceIoControl(_raw, Ctl.Load, data, (uint)data.Length, null!, 0, out _, IntPtr.Zero);
-            if (!ok) return false;
-            _safe = new Microsoft.Win32.SafeHandles.SafeFileHandle(_raw, ownsHandle: true);
-            _raw = IntPtr.Zero;
-            _loaded = true;
-            return true;
+            if (File.Exists(path)) File.Delete(path);
+            File.Move(path + ".tmp", path);
         }
-
-        public bool Execute(string functionName, ulong[]? input, ulong[]? output)
+        catch (Exception ex)
         {
-            if (!IsModuleLoaded) return false;
-            byte[] nameBytes = System.Text.Encoding.ASCII.GetBytes(functionName);
-            int inputCount = input?.Length ?? 0;
-            byte[] buffer = new byte[FN_LEN + inputCount * 8];
-            Buffer.BlockCopy(nameBytes, 0, buffer, 0, Math.Min(nameBytes.Length, FN_LEN - 1));
-            if (input != null && inputCount > 0)
-            {
-                byte[] inputBytes = new byte[inputCount * 8];
-                Buffer.BlockCopy(input, 0, inputBytes, 0, inputBytes.Length);
-                Buffer.BlockCopy(inputBytes, 0, buffer, FN_LEN, inputBytes.Length);
-            }
-            int outputCount = output?.Length ?? 0;
-            byte[] outputBuffer = outputCount > 0 ? new byte[outputCount * 8] : null!;
-            bool ok = DeviceIoControl(_safe!, Ctl.Execute, buffer, (uint)buffer.Length,
-                                      outputBuffer!, (uint)(outputBuffer?.Length ?? 0), out uint bytesReturned, IntPtr.Zero);
-            if (ok && output != null && outputBuffer != null && bytesReturned > 0)
-                Buffer.BlockCopy(outputBuffer, 0, output, 0, (int)Math.Min(bytesReturned, (uint)(outputCount * 8)));
-            return ok;
-        }
-
-        public void Dispose()
-        {
-            if (_disposed) return;
-            _loaded = false;
-            _safe?.Close();
-            if (_raw != IntPtr.Zero && _raw.ToInt64() != -1) CloseHandle(_raw);
-            _disposed = true;
+            Log($"Snapshot write error: {ex.Message}");
         }
     }
+
+    private static string JsonEscape(string s) =>
+        s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n");
+
+    private static string ShmTagName(int tag) => tag switch
+    {
+        0 => "CpuTemp", 1 => "CpuLoad", 2 => "CpuClock", 3 => "CpuPower", 4 => "CpuVoltage",
+        5 => "GpuTemp", 6 => "GpuLoad", 7 => "GpuClock", 8 => "GpuPower",
+        9 => "GpuMemory", 10 => "GpuFan", 11 => "GpuVoltage",
+        12 => "MbTemp", 13 => "MbFan", 14 => "MbVoltage",
+        15 => "StorageTemp", 16 => "StorageLoad",
+        _ => $"Unknown({tag})",
+    };
+
+    // --devmode-on / --devmode-off: 检查 dev build + marker, 然后创建/删除 .devmode_on 文件
+    // 用文件 flag 而非管道 IPC, 因 standalone 和 COM server 是不同进程, 需共享状态
+    static int DevModeToggle(bool enable)
+    {
+        string? devRepoPath = Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyMetadataAttribute>()?.Value;
+
+        if (string.IsNullOrEmpty(devRepoPath))
+        {
+            Console.Error.WriteLine("[-] Not a dev build (no DevRepoPath embedded)");
+            Console.Error.WriteLine("    Build with: dotnet build -p:Dev=true");
+            return 1;
+        }
+
+        string markerPath = Path.Combine(devRepoPath!, ".devmode_marker");
+        if (!File.Exists(markerPath))
+        {
+            Console.Error.WriteLine($"[-] Marker file not found: {markerPath}");
+            Console.Error.WriteLine("    Create it: touch .devmode_marker (in project dir, gitignored)");
+            return 1;
+        }
+
+        bool ok = DevModeVerifier.SetRuntimeOverride(enable);
+        if (ok)
+        {
+            Console.WriteLine($"[+] DevMode {(enable ? "ON" : "OFF")} — file flag updated");
+            Console.WriteLine($"    All broker processes (standalone + COM server) will read this on next call");
+            return 0;
+        }
+        else
+        {
+            Console.Error.WriteLine("[-] DevMode toggle failed");
+            return 1;
+        }
+    }
+
+    static void Log(string msg) => BrokerLogger.Log(msg);
 }
