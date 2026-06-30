@@ -1,0 +1,458 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:import namespace="http://www.w3.org/XML/1998/namespace" />
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+                <xsd:element name="comment" type="xsd:string" minOccurs="0" msdata:Ordinal="2" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+
+  <!-- ==================== Common ==================== -->
+  <data name="Common.Loading" xml:space="preserve">
+    <value>加载中…</value>
+  </data>
+  <data name="Common.Unavailable" xml:space="preserve">
+    <value>不可用</value>
+  </data>
+  <data name="Common.Unknown" xml:space="preserve">
+    <value>未知</value>
+  </data>
+  <data name="Common.NA" xml:space="preserve">
+    <value>N/A</value>
+  </data>
+  <data name="Common.Metric" xml:space="preserve">
+    <value>指标</value>
+  </data>
+  <data name="Common.Value" xml:space="preserve">
+    <value>数值</value>
+  </data>
+  <data name="Common.Temperature" xml:space="preserve">
+    <value>温度</value>
+  </data>
+  <data name="Common.SensorBackendLabel" xml:space="preserve">
+    <value>传感器后端: {0}</value>
+  </data>
+
+  <!-- ==================== Backend status ==================== -->
+  <data name="Backend.Broker" xml:space="preserve">
+    <value>Broker (最精准) ✓</value>
+  </data>
+  <data name="Backend.Hwinfo" xml:space="preserve">
+    <value>HWiNFO ✓</value>
+  </data>
+  <data name="Backend.HwinfoShm" xml:space="preserve">
+    <value>HWiNFO 共享内存 ✓</value>
+  </data>
+  <data name="Backend.ThermalZone" xml:space="preserve">
+    <value>ACPI 热区</value>
+  </data>
+  <data name="Backend.None" xml:space="preserve">
+    <value>无可用传感器后端</value>
+  </data>
+  <data name="Backend.NoneFail" xml:space="preserve">
+    <value>无可用后端 ✗</value>
+  </data>
+  <data name="Backend.Unknown" xml:space="preserve">
+    <value>未知</value>
+  </data>
+  <data name="Backend.BothUnavailable" xml:space="preserve">
+    <value>CPU 和 GPU 均无可用数据源</value>
+  </data>
+  <data name="Backend.DataSource" xml:space="preserve">
+    <value>数据源: {0}</value>
+  </data>
+  <data name="Backend.GpuCount" xml:space="preserve">
+    <value> ({0} 张卡)</value>
+  </data>
+  <data name="Backend.HwinfoWarningSoon" xml:space="preserve">
+    <value> ⚠ HWiNFO 共享内存将在约 {0} 分钟后失效，请重启 HWiNFO</value>
+  </data>
+  <data name="Backend.HwinfoExpired" xml:space="preserve">
+    <value> ⚠ HWiNFO 共享内存已超时，请重启 HWiNFO</value>
+  </data>
+  <data name="Backend.Exception" xml:space="preserve">
+    <value>传感器采集异常: {0}</value>
+  </data>
+
+  <!-- ==================== Battery status ==================== -->
+  <data name="BatteryStatus.Charging" xml:space="preserve">
+    <value>充电中</value>
+  </data>
+  <data name="BatteryStatus.Discharging" xml:space="preserve">
+    <value>放电中</value>
+  </data>
+  <data name="BatteryStatus.Full" xml:space="preserve">
+    <value>已充满</value>
+  </data>
+  <data name="BatteryStatus.NoBattery" xml:space="preserve">
+    <value>无电池</value>
+  </data>
+
+  <!-- ==================== Provider ==================== -->
+  <data name="Provider.DisplayName" xml:space="preserve">
+    <value>系统监控</value>
+  </data>
+  <data name="Provider.Title" xml:space="preserve">
+    <value>系统监控</value>
+  </data>
+  <data name="Provider.Subtitle" xml:space="preserve">
+    <value>CPU · 内存 · 磁盘 · 网络 · 电池 · GPU · 传感器 · btop4win</value>
+  </data>
+  <data name="Provider.PrecisionModeLabel" xml:space="preserve">
+    <value>高精度温度源</value>
+  </data>
+  <data name="Provider.PrecisionModeDescription" xml:space="preserve">
+    <value>选择 CPU 温度数据源精度。Broker 需 SysMonBroker 在后台运行。</value>
+  </data>
+  <data name="Provider.PrecisionChoiceBroker" xml:space="preserve">
+    <value>Broker (最精准)</value>
+  </data>
+  <data name="Provider.PrecisionChoiceNone" xml:space="preserve">
+    <value>无 (仅 ACPI)</value>
+  </data>
+
+  <!-- ==================== MainPage ==================== -->
+  <data name="MainPage.Title" xml:space="preserve">
+    <value>系统监控</value>
+  </data>
+  <data name="MainPage.CpuTitle" xml:space="preserve">
+    <value>CPU — {0}%</value>
+  </data>
+  <data name="MainPage.CpuSubtitleTemp" xml:space="preserve">
+    <value>温度 {0}°C · {1} 核心</value>
+  </data>
+  <data name="MainPage.CpuSubtitleNoTemp" xml:space="preserve">
+    <value>{0} 核心</value>
+  </data>
+  <data name="MainPage.MemoryTitle" xml:space="preserve">
+    <value>内存 — {0}%</value>
+  </data>
+  <data name="MainPage.DiskTitle" xml:space="preserve">
+    <value>磁盘 ({0} 个驱动器)</value>
+  </data>
+  <data name="MainPage.NetworkTitle" xml:space="preserve">
+    <value>网络</value>
+  </data>
+  <data name="MainPage.BatteryTitle" xml:space="preserve">
+    <value>电池 — {0}% [{1}]</value>
+  </data>
+  <data name="MainPage.BatteryUnavailable" xml:space="preserve">
+    <value>电池 — 不可用</value>
+  </data>
+  <data name="MainPage.BatterySubtitle" xml:space="preserve">
+    <value>电源状态</value>
+  </data>
+  <data name="MainPage.GpuTitleSingle" xml:space="preserve">
+    <value>GPU — {0}</value>
+  </data>
+  <data name="MainPage.GpuTitleMulti" xml:space="preserve">
+    <value>GPU — {0} 张显卡</value>
+  </data>
+  <data name="MainPage.GpuUnavailable" xml:space="preserve">
+    <value>GPU — 不可用</value>
+  </data>
+  <data name="MainPage.GpuSubtitleBackend" xml:space="preserve">
+    <value>传感器后端: {0}</value>
+  </data>
+  <data name="MainPage.SensorListTitle" xml:space="preserve">
+    <value>全部传感器</value>
+  </data>
+  <data name="MainPage.SensorSubtitleConnected" xml:space="preserve">
+    <value>Broker 已连接 · {0} 个传感器</value>
+  </data>
+  <data name="MainPage.SensorSubtitleDisconnected" xml:space="preserve">
+    <value>需要 SysMonBroker 运行中</value>
+  </data>
+  <data name="MainPage.BtopTitle" xml:space="preserve">
+    <value>启动 btop4win</value>
+  </data>
+  <data name="MainPage.BtopSubtitle" xml:space="preserve">
+    <value>终端系统监控 TUI · 支持 Broker 快照数据</value>
+  </data>
+
+  <!-- ==================== CPU detail page ==================== -->
+  <data name="Cpu.PageTitle" xml:space="preserve">
+    <value>CPU 详情</value>
+  </data>
+  <data name="Cpu.Usage" xml:space="preserve">
+    <value>使用率</value>
+  </data>
+  <data name="Cpu.LogicalCores" xml:space="preserve">
+    <value>逻辑核心</value>
+  </data>
+  <data name="Cpu.HwinfoWarning" xml:space="preserve">
+    <value>⚠ **HWiNFO 共享内存即将失效**</value>
+  </data>
+  <data name="Cpu.HwinfoWarningDetail" xml:space="preserve">
+    <value>HWiNFO 的共享内存每 ~12 小时需要重启 HWiNFO 以刷新。</value>
+  </data>
+  <data name="Cpu.HwinfoTimeRemaining" xml:space="preserve">
+    <value>预计剩余: **{0} 分钟**</value>
+  </data>
+
+  <!-- ==================== Memory detail page ==================== -->
+  <data name="Memory.PageTitle" xml:space="preserve">
+    <value>内存详情</value>
+  </data>
+  <data name="Memory.Used" xml:space="preserve">
+    <value>已用</value>
+  </data>
+  <data name="Memory.Free" xml:space="preserve">
+    <value>空闲</value>
+  </data>
+  <data name="Memory.Total" xml:space="preserve">
+    <value>总计</value>
+  </data>
+
+  <!-- ==================== Disk detail page ==================== -->
+  <data name="Disk.PageTitle" xml:space="preserve">
+    <value>磁盘详情</value>
+  </data>
+  <data name="Disk.NoDrives" xml:space="preserve">
+    <value>磁盘 — 无驱动器</value>
+  </data>
+  <data name="Disk.Subtitle" xml:space="preserve">
+    <value>{0}已用 {1}% · 空闲 {2} / {3} GB</value>
+  </data>
+
+  <!-- ==================== Network detail page ==================== -->
+  <data name="Network.PageTitle" xml:space="preserve">
+    <value>网络详情</value>
+  </data>
+  <data name="Network.Download" xml:space="preserve">
+    <value>下载</value>
+  </data>
+  <data name="Network.Upload" xml:space="preserve">
+    <value>上传</value>
+  </data>
+  <data name="Network.ActiveInterfaces" xml:space="preserve">
+    <value>### 活跃接口</value>
+  </data>
+  <data name="Network.Interface" xml:space="preserve">
+    <value>接口</value>
+  </data>
+  <data name="Network.Speed" xml:space="preserve">
+    <value>速度</value>
+  </data>
+
+  <!-- ==================== Battery detail page ==================== -->
+  <data name="Battery.PageTitle" xml:space="preserve">
+    <value>电池</value>
+  </data>
+  <data name="Battery.NotDetected" xml:space="preserve">
+    <value># 🔋 电池
+
+未检测到电池（台式机或虚拟机）。</value>
+  </data>
+  <data name="Battery.Level" xml:space="preserve">
+    <value>电量</value>
+  </data>
+  <data name="Battery.Status" xml:space="preserve">
+    <value>状态</value>
+  </data>
+
+  <!-- ==================== GPU detail page ==================== -->
+  <data name="Gpu.PageTitle" xml:space="preserve">
+    <value>GPU 详情</value>
+  </data>
+  <data name="Gpu.Usage" xml:space="preserve">
+    <value>GPU 使用率</value>
+  </data>
+  <data name="Gpu.Temp" xml:space="preserve">
+    <value>GPU 温度</value>
+  </data>
+  <data name="Gpu.MemUsed" xml:space="preserve">
+    <value>显存已用</value>
+  </data>
+  <data name="Gpu.MemTotal" xml:space="preserve">
+    <value>显存总计</value>
+  </data>
+  <data name="Gpu.NotDetected" xml:space="preserve">
+    <value>未检测到 GPU</value>
+  </data>
+  <data name="Gpu.CpuTemp" xml:space="preserve">
+    <value>CPU 温度</value>
+  </data>
+
+  <!-- ==================== Sensor list page ==================== -->
+  <data name="Sensor.PageTitle" xml:space="preserve">
+    <value>全部传感器</value>
+  </data>
+  <data name="Sensor.NoData" xml:space="preserve">
+    <value>无传感器数据</value>
+  </data>
+  <data name="Sensor.NoDataAlive" xml:space="preserve">
+    <value>Broker 已连接但暂无传感器数据</value>
+  </data>
+  <data name="Sensor.NoDataDead" xml:space="preserve">
+    <value>需要 SysMonBroker 运行中（管理员权限）</value>
+  </data>
+  <data name="Sensor.EmptyList" xml:space="preserve">
+    <value>传感器列表为空</value>
+  </data>
+  <data name="Sensor.EmptyListDetail" xml:space="preserve">
+    <value>LHM 未检测到任何可用传感器</value>
+  </data>
+  <data name="Sensor.ItemTitle" xml:space="preserve">
+    <value>{0}: {1}</value>
+  </data>
+  <data name="Sensor.NoOpTitle" xml:space="preserve">
+    <value>传感器</value>
+  </data>
+  <data name="Sensor.NoOpContent" xml:space="preserve">
+    <value>*选择一个传感器类别查看详情。*</value>
+  </data>
+
+  <!-- ==================== Btop launcher ==================== -->
+  <data name="Btop.Name" xml:space="preserve">
+    <value>启动 btop4win</value>
+  </data>
+  <data name="Btop.NotFound" xml:space="preserve">
+    <value>btop4win 未找到。请通过 scoop install btop-lhm 安装，或确保 btop.exe 在 PATH 中。</value>
+  </data>
+  <data name="Btop.LaunchFailed" xml:space="preserve">
+    <value>启动 btop4win 失败: {0}</value>
+  </data>
+
+  <!-- ==================== Dock bands ==================== -->
+  <data name="Dock.Cpu" xml:space="preserve">
+    <value>CPU</value>
+  </data>
+  <data name="Dock.CpuTitle" xml:space="preserve">
+    <value>CPU {0}%  {1}</value>
+  </data>
+  <data name="Dock.CpuTitleNoTemp" xml:space="preserve">
+    <value>CPU {0}%</value>
+  </data>
+  <data name="Dock.CpuHighLoad" xml:space="preserve">
+    <value>⚠ 高负载</value>
+  </data>
+  <data name="Dock.CpuElevated" xml:space="preserve">
+    <value>负载偏高</value>
+  </data>
+  <data name="Dock.CpuMedium" xml:space="preserve">
+    <value>中等</value>
+  </data>
+  <data name="Dock.CpuIdle" xml:space="preserve">
+    <value>空闲</value>
+  </data>
+
+  <data name="Dock.Memory" xml:space="preserve">
+    <value>内存</value>
+  </data>
+  <data name="Dock.MemoryTitle" xml:space="preserve">
+    <value>内存 {0}%</value>
+  </data>
+  <data name="Dock.MemorySubtitle" xml:space="preserve">
+    <value>已用 {0} / {1} GB</value>
+  </data>
+
+  <data name="Dock.Disk" xml:space="preserve">
+    <value>磁盘</value>
+  </data>
+  <data name="Dock.DiskNoDrive" xml:space="preserve">
+    <value>磁盘 — 无驱动器</value>
+  </data>
+
+  <data name="Dock.Download" xml:space="preserve">
+    <value>下载</value>
+  </data>
+  <data name="Dock.Upload" xml:space="preserve">
+    <value>上传</value>
+  </data>
+
+  <data name="Dock.Battery" xml:space="preserve">
+    <value>电池</value>
+  </data>
+  <data name="Dock.BatteryNoBattery" xml:space="preserve">
+    <value>电池 — 无电池</value>
+  </data>
+  <data name="Dock.BatteryDesktop" xml:space="preserve">
+    <value>台式机 / 交流电</value>
+  </data>
+  <data name="Dock.BatteryTitle" xml:space="preserve">
+    <value>电池 {0}%</value>
+  </data>
+
+  <data name="Dock.Gpu" xml:space="preserve">
+    <value>GPU</value>
+  </data>
+  <data name="Dock.GpuUnavailable" xml:space="preserve">
+    <value>GPU — 不可用</value>
+  </data>
+  <data name="Dock.GpuSubtitle" xml:space="preserve">
+    <value>需 Broker 或 HWiNFO</value>
+  </data>
+  <data name="Dock.GpuTitle" xml:space="preserve">
+    <value>GPU {0}%  {1}</value>
+  </data>
+  <data name="Dock.GpuTitleNoTemp" xml:space="preserve">
+    <value>GPU {0}</value>
+  </data>
+
+  <!-- ==================== Sensor category tags (ShmLayout.TagName) ==================== -->
+  <data name="SensorCategory.CpuTemp" xml:space="preserve">
+    <value>CPU 温度</value>
+  </data>
+  <data name="SensorCategory.CpuLoad" xml:space="preserve">
+    <value>CPU 负载</value>
+  </data>
+  <data name="SensorCategory.CpuClock" xml:space="preserve">
+    <value>CPU 频率</value>
+  </data>
+  <data name="SensorCategory.CpuPower" xml:space="preserve">
+    <value>CPU 功耗</value>
+  </data>
+  <data name="SensorCategory.CpuVoltage" xml:space="preserve">
+    <value>CPU 电压</value>
+  </data>
+  <data name="SensorCategory.GpuTemp" xml:space="preserve">
+    <value>GPU 温度</value>
+  </data>
+  <data name="SensorCategory.GpuLoad" xml:space="preserve">
+    <value>GPU 负载</value>
+  </data>
+  <data name="SensorCategory.GpuClock" xml:space="preserve">
+    <value>GPU 频率</value>
+  </data>
+  <data name="SensorCategory.GpuPower" xml:space="preserve">
+    <value>GPU 功耗</value>
+  </data>
+  <data name="SensorCategory.GpuMemory" xml:space="preserve">
+    <value>GPU 显存</value>
+  </data>
+  <data name="SensorCategory.GpuFan" xml:space="preserve">
+    <value>GPU 风扇</value>
+  </data>
+  <data name="SensorCategory.GpuVoltage" xml:space="preserve">
+    <value>GPU 电压</value>
+  </data>
+  <data name="SensorCategory.MbTemp" xml:space="preserve">
+    <value>主板温度</value>
+  </data>
+  <data name="SensorCategory.MbFan" xml:space="preserve">
+    <value>主板风扇</value>
+  </data>
+  <data name="SensorCategory.MbVoltage" xml:space="preserve">
+    <value>主板电压</value>
+  </data>
+  <data name="SensorCategory.StorageTemp" xml:space="preserve">
+    <value>存储温度</value>
+  </data>
+  <data name="SensorCategory.StorageLoad" xml:space="preserve">
+    <value>存储负载</value>
+  </data>
+</root>
