@@ -34,10 +34,10 @@ SysMonCmdPal/Generated Files/
 # Generated files
 *.g.cs
 
-# DevMode marker (local only, never commit)
+# DevMode markers (legacy, kept for safety)
 .devmode_marker
 .devmode_on
 .devmode
 
-# DevMode (developer-only, never commit)
-.devmode_marker
+# Stray compiled binaries in source tree
+SysMonCmdPal/Broker/SysMonBroker.exe

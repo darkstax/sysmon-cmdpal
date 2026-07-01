@@ -1,9 +1,10 @@
 // SysMonCmdPal/Broker/BrokerPushReceiver.cs
 // ISysMonBrokerPush 的实现，存储 Broker 推送的数据
-// 线程安全，带时间戳新鲜度检查
+// v2: 增加全量传感器快照
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 namespace SysMonCmdPal.Broker;
@@ -19,12 +20,23 @@ public sealed class BrokerGpuSnapshot
     public DateTime Timestamp { get; init; } = DateTime.UtcNow;
 }
 
+/// <summary>全量传感器快照中的单个条目</summary>
+public sealed class BrokerSensorEntry
+{
+    public int Tag { get; init; }
+    public string Name { get; init; } = "";
+    public double Value { get; init; }
+    public string Unit { get; init; } = "";
+    public int HardwareTag { get; init; }
+}
+
 /// <summary>Broker 推送的完整传感器快照</summary>
 public sealed class BrokerSensorSnapshot
 {
     public double CpuTemperature { get; init; } = -1;
     public string CpuSource { get; init; } = "";
     public ConcurrentDictionary<int, BrokerGpuSnapshot> Gpus { get; init; } = new();
+    public IReadOnlyList<BrokerSensorEntry> AllSensors { get; init; } = [];
     public DateTime LastPush { get; init; } = DateTime.UtcNow;
     public DateTime LastPing { get; init; } = DateTime.UtcNow;
 
@@ -37,36 +49,44 @@ public sealed class BrokerSensorSnapshot
 
 /// <summary>
 /// ISysMonBrokerPush 的 COM 可见实现。
-/// Broker 通过 COM 调用此对象推送传感器数据。
+/// SharedMemoryReader 通过此单例更新传感器数据。
 /// </summary>
 [ComVisible(true)]
 [Guid("A1B2C3D4-E5F6-7890-ABCD-EF1234567892")]
 public sealed class BrokerPushReceiver : ISysMonBrokerPush
 {
-    /// <summary>单例 — 供 CpuSensorReader/GpuSensorReader 读取</summary>
     public static BrokerPushReceiver Instance { get; } = new();
 
-    private volatile BrokerSensorSnapshot _snapshot = new();
+    // Lock protects the read-modify-write cycle on _snapshot.
+    // Without it, concurrent Push* calls could lose updates (volatile only
+    // guarantees reference visibility, not RMW atomicity).
+    private readonly object _lock = new();
+    private BrokerSensorSnapshot _snapshot = new();
 
-    /// <summary>当前快照（只读）</summary>
-    public BrokerSensorSnapshot Snapshot => _snapshot;
+    public BrokerSensorSnapshot Snapshot
+    {
+        get { lock (_lock) return _snapshot; }
+    }
 
-    /// <summary>Broker 当前是否可用（有心跳且数据新鲜）</summary>
-    public bool IsBrokerAvailable => _snapshot.IsAlive && _snapshot.IsFresh;
+    public bool IsBrokerAvailable => Snapshot.IsAlive && Snapshot.IsFresh;
 
     // ===== ISysMonBrokerPush 实现 =====
 
     public void PushCpuTemp(double celsius, string source)
     {
-        var old = _snapshot;
-        _snapshot = new BrokerSensorSnapshot
+        lock (_lock)
         {
-            CpuTemperature = celsius,
-            CpuSource = source,
-            Gpus = old.Gpus,
-            LastPush = DateTime.UtcNow,
-            LastPing = old.LastPing,
-        };
+            var old = _snapshot;
+            _snapshot = new BrokerSensorSnapshot
+            {
+                CpuTemperature = celsius,
+                CpuSource = source,
+                Gpus = old.Gpus,
+                AllSensors = old.AllSensors,
+                LastPush = DateTime.UtcNow,
+                LastPing = old.LastPing,
+            };
+        }
     }
 
     public void PushGpuData(int gpuIndex, string name, double tempCelsius,
@@ -82,30 +102,56 @@ public sealed class BrokerPushReceiver : ISysMonBrokerPush
             Timestamp = DateTime.UtcNow,
         };
 
-        var old = _snapshot;
-        var newGpus = new ConcurrentDictionary<int, BrokerGpuSnapshot>(old.Gpus);
-        newGpus[gpuIndex] = gpu;
-
-        _snapshot = new BrokerSensorSnapshot
+        lock (_lock)
         {
-            CpuTemperature = old.CpuTemperature,
-            CpuSource = old.CpuSource,
-            Gpus = newGpus,
-            LastPush = DateTime.UtcNow,
-            LastPing = old.LastPing,
-        };
+            var old = _snapshot;
+            var newGpus = new ConcurrentDictionary<int, BrokerGpuSnapshot>(old.Gpus);
+            newGpus[gpuIndex] = gpu;
+
+            _snapshot = new BrokerSensorSnapshot
+            {
+                CpuTemperature = old.CpuTemperature,
+                CpuSource = old.CpuSource,
+                Gpus = newGpus,
+                AllSensors = old.AllSensors,
+                LastPush = DateTime.UtcNow,
+                LastPing = old.LastPing,
+            };
+        }
+    }
+
+    /// <summary>推送全量传感器数据（v2 新增）</summary>
+    public void PushAllSensors(IReadOnlyList<BrokerSensorEntry> sensors)
+    {
+        lock (_lock)
+        {
+            var old = _snapshot;
+            _snapshot = new BrokerSensorSnapshot
+            {
+                CpuTemperature = old.CpuTemperature,
+                CpuSource = old.CpuSource,
+                Gpus = old.Gpus,
+                AllSensors = sensors,
+                LastPush = DateTime.UtcNow,
+                LastPing = old.LastPing,
+            };
+        }
     }
 
     public void Ping()
     {
-        var old = _snapshot;
-        _snapshot = new BrokerSensorSnapshot
+        lock (_lock)
         {
-            CpuTemperature = old.CpuTemperature,
-            CpuSource = old.CpuSource,
-            Gpus = old.Gpus,
-            LastPush = old.LastPush,
-            LastPing = DateTime.UtcNow,
-        };
+            var old = _snapshot;
+            _snapshot = new BrokerSensorSnapshot
+            {
+                CpuTemperature = old.CpuTemperature,
+                CpuSource = old.CpuSource,
+                Gpus = old.Gpus,
+                AllSensors = old.AllSensors,
+                LastPush = old.LastPush,
+                LastPing = DateTime.UtcNow,
+            };
+        }
     }
 }

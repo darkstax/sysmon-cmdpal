@@ -1,15 +1,17 @@
 // SysMonBroker/IPC/BrokerSharedMemory.cs
-// Broker side: writes sensor data to a named MemoryMappedFile (v2 layout)
+// Broker side: writes sensor data to a named file mapping (v2 layout)
 // v2: adds generic sensor array for full LHM data passthrough
 //
+// P/Invoke version: uses CreateFileMapping/MapViewOfFile directly instead of
+// managed MemoryMappedFile API. The managed API's persistent view locked the
+// plugin reader with "file in use" errors. Native API gives full control.
+//
 // Memory ordering contract:
-//   Writer: writes all data fields, then Thread.MemoryBarrier(), then writes counter.
+//   Writer: writes all data fields, then MemoryBarrier, then writes counter.
 //   Reader: reads counter first to detect changes, then reads data fields.
 //
-// v2.2: Shared memory ACL via P/Invoke (Everyone read, Admin write)
-//   SDDL: D:(A;;GR;;;WD)(A;;GA;;;BA)
+// ACL: D:(A;;GR;;;WD)(A;;GA;;;BA) — Everyone read, Admins full control
 
-using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -57,63 +59,83 @@ public sealed class BrokerSharedMemory : IDisposable
     private const int SensorHwOff = 60;
     private const int SensorEntrySize = 64;
 
-    // SDDL: Everyone read, Administrators full control
-    // v2.2: 通过 SetSecurityInfo 在打开后设置 DACL（兼容已有 MMF 对象）
     private const string Sddl = "D:(A;;GR;;;WD)(A;;GA;;;BA)";
 
-    private readonly MemoryMappedFile _mmf;
+    private IntPtr _hMap = IntPtr.Zero;
+    private IntPtr _pView = IntPtr.Zero;
     private readonly EventWaitHandle _event;
     private int _counter;
     private bool _disposed;
 
-    // ---- P/Invoke for security ----
+    // ---- P/Invoke ----
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateFileMapping(IntPtr hFile,
+        IntPtr lpFileMappingAttributes, uint flProtect,
+        uint dwMaximumSizeHigh, uint dwMaximumSizeLow, string lpName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr MapViewOfFile(IntPtr hFileMappingObject,
+        uint dwDesiredAccess, uint dwFileOffsetHigh, uint dwFileOffsetLow,
+        nuint dwNumberOfBytesToMap);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnmapViewOfFile(IntPtr lpBaseAddress);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr hObject);
 
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(
-        string stringSecurityDescriptor,
-        uint stringSDRevision,
-        out IntPtr securityDescriptor,
-        IntPtr securityDescriptorSize);
+        string stringSecurityDescriptor, uint stringSDRevision,
+        out IntPtr securityDescriptor, IntPtr securityDescriptorSize);
 
     [DllImport("advapi32.dll", SetLastError = true)]
     private static extern bool GetSecurityDescriptorDacl(
-        IntPtr pSecurityDescriptor,
-        out bool lpbDaclPresent,
-        out IntPtr lpbDacl,
-        out bool lpbDaclDefaulted);
+        IntPtr pSecurityDescriptor, out bool lpbDaclPresent,
+        out IntPtr lpbDacl, out bool lpbDaclDefaulted);
 
     [DllImport("advapi32.dll", SetLastError = true)]
-    private static extern uint SetSecurityInfo(
-        IntPtr handle,
-        uint ObjectType,
-        uint SecurityInfo,
-        IntPtr psidOwner,
-        IntPtr psidGroup,
-        IntPtr pDacl,
-        IntPtr pSacl);
+    private static extern uint SetSecurityInfo(IntPtr handle, uint ObjectType,
+        uint SecurityInfo, IntPtr psidOwner, IntPtr psidGroup,
+        IntPtr pDacl, IntPtr pSacl);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr LocalFree(IntPtr hMem);
+
+    private const uint PAGE_READWRITE = 0x04;
+    private const uint FILE_MAP_WRITE = 0x0002;
 
     private const uint SE_KERNEL_OBJECT = 6;
     private const uint DACL_SECURITY_INFORMATION = 4;
 
     public BrokerSharedMemory()
     {
-        // v2.2: 先创建/打开 MMF，再通过 SetSecurityInfo 设置 DACL
-        // 这样即使 MMF 已存在（旧 Broker 实例残留），也能更新 ACL
-        _mmf = MemoryMappedFile.CreateOrOpen(MapName, MapSize, MemoryMappedFileAccess.ReadWrite);
+        // Create or open the named file mapping (read-write, 16KB).
+        _hMap = CreateFileMapping(new IntPtr(-1), IntPtr.Zero, PAGE_READWRITE,
+            0, MapSize, MapName);
+        if (_hMap == IntPtr.Zero)
+            throw new System.ComponentModel.Win32Exception();
 
         ApplySecurityDescriptor();
 
         _event = new EventWaitHandle(false, EventResetMode.AutoReset, EventName);
 
-        using var accessor = _mmf.CreateViewAccessor();
-        accessor.Write(OffMagic, MagicValue);
-        accessor.Write(OffVersion, MapVersion);
+        // Map a write view — persistent for the lifetime of this object.
+        _pView = MapViewOfFile(_hMap, FILE_MAP_WRITE, 0, 0, (nuint)MapSize);
+        if (_pView == IntPtr.Zero)
+            throw new System.ComponentModel.Win32Exception();
+
+        unsafe
+        {
+            byte* p = (byte*)_pView;
+            *(int*)(p + OffMagic) = MagicValue;
+            *(int*)(p + OffVersion) = MapVersion;
+        }
     }
 
-    /// <summary>通过 SetSecurityInfo 将 SDDL DACL 应用到 MMF 内核对象</summary>
     private void ApplySecurityDescriptor()
     {
         IntPtr sd = IntPtr.Zero;
@@ -121,84 +143,64 @@ public sealed class BrokerSharedMemory : IDisposable
         {
             if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
                 Sddl, 1, out sd, IntPtr.Zero))
-                return; // 转换失败，静默降级（保持默认 ACL）
+                return;
 
             if (!GetSecurityDescriptorDacl(sd, out bool daclPresent, out IntPtr dacl, out _))
                 return;
-
             if (!daclPresent) return;
 
-            // 获取 MMF 的原生句柄
-            IntPtr handle = _mmf.SafeMemoryMappedFileHandle.DangerousGetHandle();
-
-            // 将 DACL 设置到内核对象上
-            SetSecurityInfo(handle, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION,
+            SetSecurityInfo(_hMap, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION,
                 IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
         }
         finally
         {
-            if (sd != IntPtr.Zero)
-                LocalFree(sd);
+            if (sd != IntPtr.Zero) LocalFree(sd);
         }
     }
 
-    public unsafe void Write(double cpuTemp, string source, List<Sensors.GpuReading> gpus,
-        List<SensorEntry> sensors)
+    public unsafe void Write(double cpuTemp, string source,
+        List<Sensors.GpuReading> gpus, List<SensorEntry> sensors)
     {
-        if (_disposed) return;
+        if (_disposed || _pView == IntPtr.Zero) return;
 
-        using var accessor = _mmf.CreateViewAccessor();
-        byte* ptr = null;
-        try
+        byte* p = (byte*)_pView;
+
+        _counter++;
+        *(int*)(p + OffMagic) = MagicValue;
+        *(int*)(p + OffVersion) = MapVersion;
+
+        *(double*)(p + OffCpuTemp) = cpuTemp;
+        WriteString(p + OffSource, source, 32);
+
+        int gpuCount = Math.Min(gpus.Count, MaxGpus);
+        *(int*)(p + OffGpuCount) = gpuCount;
+        for (int i = 0; i < gpuCount; i++)
         {
-            accessor.SafeMemoryMappedViewHandle.AcquirePointer(ref ptr);
-
-            _counter++;
-            *(int*)(ptr + OffMagic) = MagicValue;
-            *(int*)(ptr + OffVersion) = MapVersion;
-
-            // CPU
-            *(double*)(ptr + OffCpuTemp) = cpuTemp;
-            WriteString(ptr + OffSource, source, 32);
-
-            // GPU
-            int gpuCount = Math.Min(gpus.Count, MaxGpus);
-            *(int*)(ptr + OffGpuCount) = gpuCount;
-            for (int i = 0; i < gpuCount; i++)
-            {
-                byte* gpuPtr = ptr + OffGpuBase + (i * GpuEntrySize);
-                WriteString(gpuPtr, gpus[i].Name, GpuNameLen);
-                *(double*)(gpuPtr + GpuTempOff) = gpus[i].TempCelsius;
-                *(double*)(gpuPtr + GpuUsageOff) = gpus[i].UsagePercent;
-                *(double*)(gpuPtr + GpuMemUsedOff) = gpus[i].MemUsedMB;
-                *(double*)(gpuPtr + GpuMemTotalOff) = gpus[i].MemTotalMB;
-            }
-
-            // Timestamp
-            *(long*)(ptr + OffTimestamp) = DateTime.UtcNow.Ticks;
-
-            // Generic sensors (v2)
-            int sensorCount = Math.Min(sensors.Count, MaxSensors);
-            *(int*)(ptr + OffSensorCount) = sensorCount;
-            for (int i = 0; i < sensorCount; i++)
-            {
-                byte* sPtr = ptr + OffSensorBase + (i * SensorEntrySize);
-                var s = sensors[i];
-                *(int*)(sPtr + SensorTagOff) = s.Tag;
-                WriteString(sPtr + SensorNameOff, s.Name, 32);
-                *(double*)(sPtr + SensorValueOff) = s.Value;
-                WriteString(sPtr + SensorUnitOff, s.Unit, 16);
-                *(int*)(sPtr + SensorHwOff) = s.HardwareTag;
-            }
-
-            Thread.MemoryBarrier();
-            *(int*)(ptr + OffCounter) = _counter;
+            byte* gpuPtr = p + OffGpuBase + (i * GpuEntrySize);
+            WriteString(gpuPtr, gpus[i].Name, GpuNameLen);
+            *(double*)(gpuPtr + GpuTempOff) = gpus[i].TempCelsius;
+            *(double*)(gpuPtr + GpuUsageOff) = gpus[i].UsagePercent;
+            *(double*)(gpuPtr + GpuMemUsedOff) = gpus[i].MemUsedMB;
+            *(double*)(gpuPtr + GpuMemTotalOff) = gpus[i].MemTotalMB;
         }
-        finally
+
+        *(long*)(p + OffTimestamp) = DateTime.UtcNow.Ticks;
+
+        int sensorCount = Math.Min(sensors.Count, MaxSensors);
+        *(int*)(p + OffSensorCount) = sensorCount;
+        for (int i = 0; i < sensorCount; i++)
         {
-            if (ptr != null)
-                accessor.SafeMemoryMappedViewHandle.ReleasePointer();
+            byte* sPtr = p + OffSensorBase + (i * SensorEntrySize);
+            var s = sensors[i];
+            *(int*)(sPtr + SensorTagOff) = s.Tag;
+            WriteString(sPtr + SensorNameOff, s.Name, 32);
+            *(double*)(sPtr + SensorValueOff) = s.Value;
+            WriteString(sPtr + SensorUnitOff, s.Unit, 16);
+            *(int*)(sPtr + SensorHwOff) = s.HardwareTag;
         }
+
+        Thread.MemoryBarrier();
+        *(int*)(p + OffCounter) = _counter;
 
         _event.Set();
     }
@@ -210,6 +212,11 @@ public sealed class BrokerSharedMemory : IDisposable
         if (string.IsNullOrEmpty(value)) return;
         var bytes = Encoding.UTF8.GetBytes(value);
         int len = Math.Min(bytes.Length, maxBytes - 1);
+        if (bytes.Length > maxBytes - 1)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[SHM] WriteString truncated: input={bytes.Length}B, buffer={maxBytes - 1}B, value='{value}'");
+        }
         for (int i = 0; i < len; i++)
             dest[i] = bytes[i];
     }
@@ -218,7 +225,17 @@ public sealed class BrokerSharedMemory : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _mmf.Dispose();
+
+        if (_pView != IntPtr.Zero)
+        {
+            UnmapViewOfFile(_pView);
+            _pView = IntPtr.Zero;
+        }
+        if (_hMap != IntPtr.Zero)
+        {
+            CloseHandle(_hMap);
+            _hMap = IntPtr.Zero;
+        }
         _event.Dispose();
     }
 }

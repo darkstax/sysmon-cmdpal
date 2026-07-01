@@ -26,6 +26,9 @@ internal sealed class HwinfoSharedMemoryReader : IDisposable
     private const string HwinfoMapName = @"Global\HWiNFO_SENS_SM2";
     private const uint HwinfoSignature = 0x53695748; // "HWiS" little-endian
     private const int HwinfoTypeTemp = 1;
+    private const int HwinfoTypePower = 5;
+    private const int HwinfoTypeUsage = 7;
+    private const int HwinfoTypeData = 8;
     private const int HwinfoStrLen = 128;
 
     // Header field indices (as int32 array from base)
@@ -217,8 +220,101 @@ internal sealed class HwinfoSharedMemoryReader : IDisposable
     private static readonly string[] GpuPreferredLabels =
         ["GPU Core", "GPU Hot Spot", "GPU Junction", "GPU Temperature"];
 
-    /// <summary>读取 GPU 温度</summary>
-    public (double Temp, string Label) ReadGpuTemp()
+    /// <summary>读取第 index 个 GPU 温度（0=第一个/集显, 1=第二个/独显）。
+    /// 严格匹配 "GPU Temperature"，不匹配 Hot Spot/Memory Junction 等子项。</summary>
+    public (double Temp, string Label) ReadGpuTemp(int index = 0)
+    {
+        lock (_lock)
+        {
+            if (!_available || _accessor == null) return (-1, "");
+
+            try
+            {
+                int found = 0;
+                for (int i = 0; i < _entryCount; i++)
+                {
+                    int baseOff = _entryOffset + _entrySize * i;
+                    if (_accessor.ReadInt32(baseOff + EntryType) != HwinfoTypeTemp) continue;
+
+                    string label = ReadLabel(baseOff);
+                    double val = ReadValue(baseOff);
+                    if (val <= 0 || val > 150) continue;
+
+                    // 只匹配精确的 "GPU Temperature"（排除 Hot Spot / Memory Junction / Thermal Limit）
+                    if (!label.Equals("GPU Temperature", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    if (found == index)
+                        return (val, label);
+                    found++;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[HWiNFO] ReadGpuTemp exception: {ex.Message}");
+                _available = false;
+            }
+
+            return (-1, "");
+        }
+    }
+
+    /// <summary>
+    /// 读取 GPU 使用率。返回 (独显CoreLoad%, 集显Utilization%)。
+    /// 独显优先 GPU Core Load，集显用 GPU Utilization。
+    /// </summary>
+    public (double DgpuLoad, double IgpuLoad, string DgpuLabel, string IgpuLabel) ReadGpuUsageAll()
+    {
+        lock (_lock)
+        {
+            if (!_available || _accessor == null) return (-1, -1, "", "");
+
+            try
+            {
+                double dgpu = -1, igpu = -1;
+                string dgpuLabel = "", igpuLabel = "";
+
+                for (int i = 0; i < _entryCount; i++)
+                {
+                    int baseOff = _entryOffset + _entrySize * i;
+                    if (_accessor.ReadInt32(baseOff + EntryType) != HwinfoTypeUsage) continue;
+
+                    string label = ReadLabel(baseOff);
+                    double val = ReadValue(baseOff);
+                    if (val < 0 || val > 100) continue;
+
+                    // 独显：GPU Core Load（精确匹配，不用 D3D Usage 回退避免匹配到集显的 D3D）
+                    if (dgpu < 0 && label.Contains("GPU Core Load", StringComparison.OrdinalIgnoreCase))
+                    {
+                        dgpu = val;
+                        dgpuLabel = label;
+                    }
+                    // 集显：GPU Utilization
+                    else if (igpu < 0 && label.Contains("GPU Utilization", StringComparison.OrdinalIgnoreCase))
+                    {
+                        igpu = val;
+                        igpuLabel = label;
+                    }
+
+                    if (dgpu >= 0 && igpu >= 0) break;
+                }
+
+                return (dgpu, igpu, dgpuLabel, igpuLabel);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[HWiNFO] ReadGpuUsageAll exception: {ex.Message}");
+                _available = false;
+            }
+
+            return (-1, -1, "", "");
+        }
+    }
+
+    /// <summary>
+    /// 读取 GPU 显存使用率 (%)。匹配 GPU Memory Usage。
+    /// </summary>
+    public (double Usage, string Label) ReadGpuMemoryUsage()
     {
         lock (_lock)
         {
@@ -229,37 +325,68 @@ internal sealed class HwinfoSharedMemoryReader : IDisposable
                 for (int i = 0; i < _entryCount; i++)
                 {
                     int baseOff = _entryOffset + _entrySize * i;
-                    if (_accessor.ReadInt32(baseOff + EntryType) != HwinfoTypeTemp) continue;
+                    if (_accessor.ReadInt32(baseOff + EntryType) != HwinfoTypeUsage) continue;
 
                     string label = ReadLabel(baseOff);
                     double val = ReadValue(baseOff);
-                    if (val <= 0 || val > 150) continue;
+                    if (val < 0 || val > 100) continue;
 
-                    foreach (var pref in GpuPreferredLabels)
-                        if (label.Contains(pref, StringComparison.OrdinalIgnoreCase))
-                            return (val, label);
-                }
-
-                for (int i = 0; i < _entryCount; i++)
-                {
-                    int baseOff = _entryOffset + _entrySize * i;
-                    if (_accessor.ReadInt32(baseOff + EntryType) != HwinfoTypeTemp) continue;
-
-                    string label = ReadLabel(baseOff);
-                    double val = ReadValue(baseOff);
-                    if (val <= 0 || val > 150) continue;
-
-                    if (label.Contains("GPU", StringComparison.OrdinalIgnoreCase))
+                    if (label.Contains("GPU Memory Usage", StringComparison.OrdinalIgnoreCase))
                         return (val, label);
                 }
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[HWiNFO] ReadGpuTemp exception: {ex.Message}");
+                Debug.WriteLine($"[HWiNFO] ReadGpuMemoryUsage exception: {ex.Message}");
                 _available = false;
             }
 
             return (-1, "");
+        }
+    }
+
+    /// <summary>
+    /// 读取 GPU 显存 (MB)。返回 (已分配MB, 可用MB, 总量MB)。
+    /// 匹配标签：GPU Memory Allocated + GPU Memory Available。
+    /// 总量 = 已分配 + 可用。如果没有这两个标签返回 (-1, -1, -1)。
+    /// </summary>
+    public (double UsedMB, double AvailableMB, double TotalMB) ReadGpuMemoryMB()
+    {
+        lock (_lock)
+        {
+            if (!_available || _accessor == null) return (-1, -1, -1);
+
+            try
+            {
+                double allocated = -1, available = -1;
+                for (int i = 0; i < _entryCount; i++)
+                {
+                    int baseOff = _entryOffset + _entrySize * i;
+                    if (_accessor.ReadInt32(baseOff + EntryType) != HwinfoTypeData) continue;
+
+                    string label = ReadLabel(baseOff);
+                    double val = ReadValue(baseOff);
+                    if (val < 0) continue;
+
+                    if (label.Contains("GPU Memory Allocated", StringComparison.OrdinalIgnoreCase))
+                        allocated = val;
+                    else if (label.Contains("GPU Memory Available", StringComparison.OrdinalIgnoreCase))
+                        available = val;
+                }
+
+                if (allocated >= 0 && available >= 0)
+                {
+                    double total = allocated + available;
+                    return (allocated, available, total);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[HWiNFO] ReadGpuMemoryMB exception: {ex.Message}");
+                _available = false;
+            }
+
+            return (-1, -1, -1);
         }
     }
 
@@ -297,6 +424,120 @@ internal sealed class HwinfoSharedMemoryReader : IDisposable
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// 读取 CPU 功率 (W)。匹配优先标签：CPU Package Power / Package Power / CPU PPT / CPU Power。
+    /// </summary>
+    public (double Power, string Label) ReadCpuPower()
+    {
+        lock (_lock)
+        {
+            if (!_available || _accessor == null) return (-1, "");
+
+            try
+            {
+                string[] PreferredLabels =
+                    ["CPU Package Power", "Package Power", "CPU PPT", "CPU Power", "Core Power (SVI2 TFN)"];
+
+                // Pass 0: preferred labels
+                for (int i = 0; i < _entryCount; i++)
+                {
+                    int baseOff = _entryOffset + _entrySize * i;
+                    if (_accessor.ReadInt32(baseOff + EntryType) != HwinfoTypePower) continue;
+
+                    string label = ReadLabel(baseOff);
+                    double val = ReadValue(baseOff);
+                    if (string.IsNullOrEmpty(label) || val < 0 || val > 500) continue;
+
+                    foreach (var pref in PreferredLabels)
+                        if (label.Contains(pref, StringComparison.OrdinalIgnoreCase))
+                            return (val, label);
+                }
+
+                // Pass 1: any label containing both "CPU" and "Power" (or "PPT")
+                for (int i = 0; i < _entryCount; i++)
+                {
+                    int baseOff = _entryOffset + _entrySize * i;
+                    if (_accessor.ReadInt32(baseOff + EntryType) != HwinfoTypePower) continue;
+
+                    string label = ReadLabel(baseOff);
+                    double val = ReadValue(baseOff);
+                    if (string.IsNullOrEmpty(label) || val < 0 || val > 500) continue;
+
+                    if ((label.Contains("CPU", StringComparison.OrdinalIgnoreCase) &&
+                         label.Contains("Power", StringComparison.OrdinalIgnoreCase)) ||
+                        label.Contains("PPT", StringComparison.OrdinalIgnoreCase))
+                        return (val, label);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[HWiNFO] ReadCpuPower exception: {ex.Message}");
+                _available = false;
+            }
+        }
+
+        return (-1, "");
+    }
+
+    /// <summary>
+    /// 读取 GPU 功率 (W)。返回集显+独显总和。
+    /// 匹配标签：GPU ASIC Power（集显）、GPU Power（独显）。
+    /// </summary>
+    public (double TotalPower, string Detail) ReadGpuPower()
+    {
+        lock (_lock)
+        {
+            if (!_available || _accessor == null) return (-1, "");
+
+            try
+            {
+                double asicPower = 0, gpuPower = 0;
+                string asicLabel = "", gpuLabel = "";
+
+                for (int i = 0; i < _entryCount; i++)
+                {
+                    int baseOff = _entryOffset + _entrySize * i;
+                    if (_accessor.ReadInt32(baseOff + EntryType) != HwinfoTypePower) continue;
+
+                    string label = ReadLabel(baseOff);
+                    double val = ReadValue(baseOff);
+                    if (string.IsNullOrEmpty(label) || val <= 0 || val > 500) continue;
+
+                    // 集显：GPU ASIC Power（APU 集成 GPU 总功率）
+                    if (label.Contains("GPU ASIC Power", StringComparison.OrdinalIgnoreCase) ||
+                        label.Contains("APU GPU Power", StringComparison.OrdinalIgnoreCase))
+                    {
+                        asicPower = val;
+                        asicLabel = label;
+                    }
+                    // 独显：GPU Power（独立 GPU 总功率，不包含子项如 NVVDD/FBVDD）
+                    else if (label.Equals("GPU Power", StringComparison.OrdinalIgnoreCase) ||
+                             label.Equals("GPU Chip Power", StringComparison.OrdinalIgnoreCase))
+                    {
+                        gpuPower = val;
+                        gpuLabel = label;
+                    }
+                }
+
+                double total = asicPower + gpuPower;
+                if (total > 0)
+                {
+                    var parts = new List<string>();
+                    if (asicPower > 0) parts.Add($"iGPU {asicPower:F1}");
+                    if (gpuPower > 0) parts.Add($"dGPU {gpuPower:F1}");
+                    return (total, string.Join(" + ", parts));
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[HWiNFO] ReadGpuPower exception: {ex.Message}");
+                _available = false;
+            }
+        }
+
+        return (-1, "");
     }
 
     // ========================================================================

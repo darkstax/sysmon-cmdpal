@@ -97,6 +97,9 @@
   <data name="BatteryStatus.Full" xml:space="preserve">
     <value>Full</value>
   </data>
+  <data name="BatteryStatus.Dual" xml:space="preserve">
+    <value>Dual Power</value>
+  </data>
   <data name="BatteryStatus.NoBattery" xml:space="preserve">
     <value>No battery</value>
   </data>

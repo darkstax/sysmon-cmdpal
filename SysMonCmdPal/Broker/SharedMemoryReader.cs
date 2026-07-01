@@ -87,6 +87,11 @@ public sealed class SharedMemoryReader : IDisposable
 
     private const uint FILE_MAP_COPY = 0x0001;
 
+    // 持久句柄 — 避免每次循环 OpenExisting/Dispose 的开销
+    private System.IO.MemoryMappedFiles.MemoryMappedFile? _mmf;
+    private System.IO.MemoryMappedFiles.MemoryMappedViewAccessor? _accessor;
+    private readonly byte[] _buffer = new byte[MapSize];
+
     public SharedMemoryReader()
     {
         _running = true;
@@ -102,85 +107,67 @@ public sealed class SharedMemoryReader : IDisposable
     {
         while (_running)
         {
-            IntPtr hMap = IntPtr.Zero;
-            IntPtr pView = IntPtr.Zero;
             try
             {
-                // Open the named file mapping (read-only access).
-                hMap = OpenFileMapping(FILE_MAP_COPY, false, MapName);
-                if (hMap == IntPtr.Zero)
+                // 持久句柄 — 只在首次或断开后重新连接
+                if (_mmf == null || _accessor == null)
                 {
-                    // Broker not running — retry later.
-                    Thread.Sleep(5000);
-                    continue;
+                    _mmf = System.IO.MemoryMappedFiles.MemoryMappedFile.OpenExisting(
+                        MapName, System.IO.MemoryMappedFiles.MemoryMappedFileRights.Read);
+                    _accessor = _mmf.CreateViewAccessor(0, MapSize,
+                        System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read);
                 }
 
-                // Map a COPY view. FILE_MAP_COPY creates a private copy-on-write
-                // view that NEVER blocks the Broker writer. The OS pages in a
-                // snapshot of the current data; Broker can keep writing freely.
-                pView = MapViewOfFile(hMap, FILE_MAP_COPY, 0, 0, (nuint)MapSize);
-                if (pView == IntPtr.Zero)
-                {
-                    Thread.Sleep(5000);
-                    continue;
-                }
-
-                unsafe
-                {
-                    ParseSnapshot((byte*)pView);
-                }
+                // 复用 buffer — 只拷贝实际需要的数据
+                _accessor.ReadArray(0, _buffer, 0, MapSize);
+                ParseSnapshot(_buffer);
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ShmReader] ReaderLoop exception: {ex.GetType().Name}: {ex.Message}");
-            }
-            finally
-            {
-                // Unmap and close handle EVERY cycle — never hold a persistent view.
-                if (pView != IntPtr.Zero)
-                    UnmapViewOfFile(pView);
-                if (hMap != IntPtr.Zero)
-                    CloseHandle(hMap);
+                // 句柄失效 — 重置以便下次重连
+                _accessor?.Dispose();
+                _mmf?.Dispose();
+                _accessor = null;
+                _mmf = null;
             }
 
-            Thread.Sleep(2000);
+            Thread.Sleep(1000);
         }
     }
 
-    private unsafe void ParseSnapshot(byte* p)
+    private void ParseSnapshot(byte[] buf)
     {
-        int magic = *(int*)(p + OffMagic);
+        int magic = BitConverter.ToInt32(buf, OffMagic);
         if (magic != MagicValue)
             return;
 
-        int counter = *(int*)(p + OffCounter);
+        int counter = BitConverter.ToInt32(buf, OffCounter);
         if (counter == _lastCounter)
         {
-            // No new data, but still ping so IsAlive stays true.
             BrokerPushReceiver.Instance.Ping();
             return;
         }
         _lastCounter = counter;
 
-        int version = *(int*)(p + OffVersion);
+        int version = BitConverter.ToInt32(buf, OffVersion);
 
         // Read CPU
-        double cpuTemp = *(double*)(p + OffCpuTemp);
-        string source = ReadString(p + OffSource, 32);
+        double cpuTemp = BitConverter.ToDouble(buf, OffCpuTemp);
+        string source = ReadString(buf, OffSource, 32);
 
         if (cpuTemp > 0)
             BrokerPushReceiver.Instance.PushCpuTemp(cpuTemp, source);
 
         // Read GPUs
-        int gpuCount = Math.Min(*(int*)(p + OffGpuCount), MaxGpus);
+        int gpuCount = Math.Min(BitConverter.ToInt32(buf, OffGpuCount), MaxGpus);
         for (int i = 0; i < gpuCount; i++)
         {
-            byte* gpuPtr = p + OffGpuBase + (i * GpuEntrySize);
-            string name = ReadString(gpuPtr, GpuNameLen);
-            double temp = *(double*)(gpuPtr + GpuTempOff);
-            double usage = *(double*)(gpuPtr + GpuUsageOff);
-            double memUsed = *(double*)(gpuPtr + GpuMemUsedOff);
-            double memTotal = *(double*)(gpuPtr + GpuMemTotalOff);
+            int gpuOff = OffGpuBase + (i * GpuEntrySize);
+            string name = ReadString(buf, gpuOff, GpuNameLen);
+            double temp = BitConverter.ToDouble(buf, gpuOff + GpuTempOff);
+            double usage = BitConverter.ToDouble(buf, gpuOff + GpuUsageOff);
+            double memUsed = BitConverter.ToDouble(buf, gpuOff + GpuMemUsedOff);
+            double memTotal = BitConverter.ToDouble(buf, gpuOff + GpuMemTotalOff);
 
             BrokerPushReceiver.Instance.PushGpuData(
                 i, name, temp, usage, memUsed, memTotal);
@@ -189,17 +176,17 @@ public sealed class SharedMemoryReader : IDisposable
         // Read generic sensors (v2)
         if (version >= 2)
         {
-            int sensorCount = Math.Min(*(int*)(p + OffSensorCount), MaxSensors);
+            int sensorCount = Math.Min(BitConverter.ToInt32(buf, OffSensorCount), MaxSensors);
             var sensors = new List<BrokerSensorEntry>(sensorCount);
 
             for (int i = 0; i < sensorCount; i++)
             {
-                byte* sPtr = p + OffSensorBase + (i * SensorEntrySize);
-                int tag = *(int*)(sPtr + SensorTagOff);
-                string name = ReadString(sPtr + SensorNameOff, 32);
-                double value = *(double*)(sPtr + SensorValueOff);
-                string unit = ReadString(sPtr + SensorUnitOff, 16);
-                int hwTag = *(int*)(sPtr + SensorHwOff);
+                int sOff = OffSensorBase + (i * SensorEntrySize);
+                int tag = BitConverter.ToInt32(buf, sOff + SensorTagOff);
+                string name = ReadString(buf, sOff + SensorNameOff, 32);
+                double value = BitConverter.ToDouble(buf, sOff + SensorValueOff);
+                string unit = ReadString(buf, sOff + SensorUnitOff, 16);
+                int hwTag = BitConverter.ToInt32(buf, sOff + SensorHwOff);
 
                 sensors.Add(new BrokerSensorEntry
                 {
@@ -218,12 +205,12 @@ public sealed class SharedMemoryReader : IDisposable
         BrokerPushReceiver.Instance.Ping();
     }
 
-    private static unsafe string ReadString(byte* src, int maxBytes)
+    private static string ReadString(byte[] buf, int offset, int maxBytes)
     {
         int len = 0;
-        while (len < maxBytes && src[len] != 0)
+        while (len < maxBytes && buf[offset + len] != 0)
             len++;
-        return len > 0 ? Encoding.UTF8.GetString(src, len) : "";
+        return len > 0 ? Encoding.UTF8.GetString(buf, offset, len) : "";
     }
 
     public void Dispose()
@@ -233,5 +220,7 @@ public sealed class SharedMemoryReader : IDisposable
         _running = false;
         try { _readerThread.Join(3000); }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[ShmReader] Join timeout: {ex.Message}"); }
+        _accessor?.Dispose();
+        _mmf?.Dispose();
     }
 }

@@ -94,32 +94,7 @@ public class SparklineChartTests
         Assert.True(png.Length < 200, $"1×1 PNG should be small, got {png.Length} bytes");
     }
 
-    // ── ToDataUrl ──
-
-    [Fact]
-    public void ToDataUrl_StartsWithDataUri()
-    {
-        var chart = new SparklineChart(maxPoints: 10, width: 100, height: 50);
-        chart.Push(42);
-
-        string url = chart.ToDataUrl();
-
-        Assert.StartsWith("data:image/png;base64,", url);
-    }
-
-    [Fact]
-    public void ToDataUrl_Base64DecodesToPng()
-    {
-        var chart = new SparklineChart(maxPoints: 10, width: 100, height: 50);
-        chart.Push(10);
-        chart.Push(80);
-
-        string url = chart.ToDataUrl();
-        string base64 = url["data:image/png;base64,".Length..];
-        byte[] bytes = Convert.FromBase64String(base64);
-
-        Assert.Equal(PngSignature, bytes[..8]);
-    }
+    // ── ToDataUrl 已被 ToSvgDataUri (SVG) 替代，原 PNG base64 测试已移除 ──
 
     // ── 自定义尺寸 ──
 

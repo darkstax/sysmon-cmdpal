@@ -97,6 +97,9 @@
   <data name="BatteryStatus.Full" xml:space="preserve">
     <value>已充满</value>
   </data>
+  <data name="BatteryStatus.Dual" xml:space="preserve">
+    <value>双重供电</value>
+  </data>
   <data name="BatteryStatus.NoBattery" xml:space="preserve">
     <value>无电池</value>
   </data>

@@ -10,34 +10,33 @@
     <UseWinUI>false</UseWinUI>
     <EnableMsixTooling>true</EnableMsixTooling>
     <GenerateAppxPackageOnBuild>true</GenerateAppxPackageOnBuild>
-    <PackageCertificateKeyFile>SysMonCmdPal_TemporaryKey.pfx</PackageCertificateKeyFile>
-    <PackageCertificateThumbprint>E4413FD3511C75288054D6EADE74783AF95031D5</PackageCertificateThumbprint>
-    <PackageCertificatePassword>SysMonCmdPal</PackageCertificatePassword>
+    <PackageCertificateKeyFile>SysPulse_TemporaryKey.pfx</PackageCertificateKeyFile>
+    <PackageCertificateThumbprint>740708ED2D4E9772D7A45EBE481F80C1CC325790</PackageCertificateThumbprint>
+    <PackageCertificatePassword>SysPulse</PackageCertificatePassword>
     <PublishProfile>win-$(Platform).pubxml</PublishProfile>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>preview</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
+    <!-- i18n: default language + PRI generation -->
+    <DefaultLanguage>en-US</DefaultLanguage>
+    <GenerateResourceUsePreserializedResources>true</GenerateResourceUsePreserializedResources>
+
     <!-- 程序集元数据 -->
     <Company>darkstax</Company>
     <Product>SysMonCmdPal - System Monitor for PowerToys Command Palette</Product>
     <Description>PowerToys Command Palette 系统监控扩展：CPU/内存/磁盘/网络/电池/GPU/传感器实时数据</Description>
     <Copyright>Copyright (c) 2026 darkstax</Copyright>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
-    <FileVersion>1.1.0.0</FileVersion>
-    <Version>1.1.0.0</Version>
+    <AssemblyVersion>1.5.0.0</AssemblyVersion>
+    <FileVersion>1.5.0.0</FileVersion>
+    <Version>1.5.0.0</Version>
 
     <!-- AOT/Trim for Release -->
     <PublishTrimmed Condition="'$(Configuration)' == 'Release'">true</PublishTrimmed>
     <IsAotCompatible Condition="'$(Configuration)' == 'Release'">true</IsAotCompatible>
     <CsWinRTAotOptimizerEnabled Condition="'$(Configuration)' == 'Release'">true</CsWinRTAotOptimizerEnabled>
   </PropertyGroup>
-
-  <!-- LibreHardwareMonitorLib 依赖反射发现硬件类型，裁剪会破坏运行时传感器检测 -->
-  <ItemGroup>
-    <TrimmerRootAssembly Include="LibreHardwareMonitorLib" />
-  </ItemGroup>
 
   <!-- Test visibility -->
   <ItemGroup>
@@ -67,10 +66,9 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="LibreHardwareMonitorLib" Version="0.9.6" />
     <!-- .NET 10 将 PerformanceCounter 拆分成了独立 NuGet 包 -->
     <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="9.0.0" />
-    <PackageReference Include="System.Management" Version="10.0.2" />
+    <PackageReference Include="System.Management" Version="9.0.0" />
     <PackageReference Include="System.Text.Json" Version="9.0.0" />
   </ItemGroup>
 
@@ -82,6 +80,11 @@
   <ItemGroup>
     <Content Include="Public\manifest.json" />
   </ItemGroup>
+
+  <!-- Broker: 独立分发，不包含在 MSIX 包中 -->
+  <!-- <ItemGroup>
+    <Content Include="Broker\SysMonBroker.exe" Condition="Exists('Broker\SysMonBroker.exe')" />
+  </ItemGroup> -->
 
   <!-- Assets -->
   <ItemGroup>

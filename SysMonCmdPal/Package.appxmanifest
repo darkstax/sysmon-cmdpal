@@ -9,12 +9,12 @@
   IgnorableNamespaces="uap uap3 rescap">
 
   <Identity
-    Name="SysMonCmdPal"
-    Publisher="CN=darkstax"
-    Version="1.1.0.0" />
+    Name="darkstax.SysPulseforCommandPalette"
+    Publisher="CN=B58A0E15-179C-417E-BD92-D081080DA9A7"
+    Version="1.3.0.8" />
 
   <Properties>
-    <DisplayName>System Monitor for Command Palette</DisplayName>
+    <DisplayName>SysPulse for Command Palette</DisplayName>
     <PublisherDisplayName>darkstax</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -33,7 +33,7 @@
       Executable="$targetnametoken$.exe"
       EntryPoint="$targetentrypoint$">
       <uap:VisualElements
-        DisplayName="System Monitor"
+        DisplayName="SysPulse"
         Description="Real-time system monitor for Command Palette — CPU, memory, disk, network, battery"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.scale-200.png"
@@ -44,8 +44,8 @@
       <Extensions>
         <com:Extension Category="windows.comServer">
           <com:ComServer>
-            <com:ExeServer Executable="SysMonCmdPal.exe" Arguments="-RegisterProcessAsComServer" DisplayName="SysMonCmdPalApp">
-              <com:Class Id="A1B2C3D4-E5F6-7890-ABCD-EF1234567890" DisplayName="SysMonCmdPal" />
+            <com:ExeServer Executable="SysMonCmdPal.exe" Arguments="-RegisterProcessAsComServer" DisplayName="SysPulse">
+              <com:Class Id="A1B2C3D4-E5F6-7890-ABCD-EF1234567890" DisplayName="SysPulse" />
             </com:ExeServer>
           </com:ComServer>
         </com:Extension>
@@ -53,7 +53,7 @@
           <uap3:AppExtension Name="com.microsoft.commandpalette"
             Id="SysMonCmdPal"
             PublicFolder="Public"
-            DisplayName="System Monitor"
+            DisplayName="SysPulse"
             Description="Real-time system monitor — CPU, memory, disk, network, and battery at a glance">
             <uap3:Properties>
               <CmdPalProvider>
