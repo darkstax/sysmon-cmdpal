@@ -45,6 +45,7 @@ public struct SystemSnapshot
     public string BackendNote;          // 后端状态描述（null=正常）
     public bool HwinfoNearReset;        // HWiNFO 接近 12h 重置窗口
     public TimeSpan HwinfoTimeRemaining; // HWiNFO 距重置剩余时间
+    public double CpuFrequency;         // 全核心平均频率 MHz, -1=不可用
 }
 
 public struct DiskInfo
@@ -125,9 +126,11 @@ public class SystemInfoService
     // ---- Sub-monitors ----
     private readonly NetworkMonitor _network = new();
     private readonly DiskMonitor _disk = new();
+    private readonly CpuFrequencyReader _cpuFreq = new();
 
     // ---- CPU counter (cached, reused across Refresh calls) ----
     private PerformanceCounter? _cpuCounter;
+    private readonly object _cpuCounterLock = new();
 
     // ---- Sparkline charts (pushed every Refresh, read by detail pages) ----
     public SparklineChart CpuChart { get; } = new(maxPoints: 34, metric: ChartMetric.Cpu);
@@ -199,7 +202,14 @@ public class SystemInfoService
         }
     }
 
-    public SystemSnapshot Current { get; private set; }
+    private SystemSnapshot _current;
+    private readonly object _currentLock = new();
+
+    public SystemSnapshot Current
+    {
+        get { lock (_currentLock) return _current; }
+        private set { lock (_currentLock) _current = value; }
+    }
 
     private SystemInfoService()
     {
@@ -217,9 +227,16 @@ public class SystemInfoService
 
     /// <summary>
     /// 刷新所有指标。建议每秒调用一次。
+    /// 线程安全：如果另一个线程正在刷新，本次调用直接跳过（返回旧快照）。
     /// </summary>
     public void Refresh()
     {
+        // P6: 防止多线程并发 Refresh（DockBand coordinator + 任何直接调用者）
+        if (System.Threading.Interlocked.Exchange(ref _isRefreshing, 1) != 0)
+            return;
+
+        try
+        {
         var now = DateTime.UtcNow;
         var (netDown, netUp) = _network.ReadSpeed(now);
 
@@ -245,6 +262,10 @@ public class SystemInfoService
         // 传感器采集: Broker 共享内存推送 → ThermalZone → None
         TryReadSensors(ref snapshot);
 
+        // CPU 频率 (任务管理器算法: 基础频率 × 性能百分比 / 100)
+        try { snapshot.CpuFrequency = _cpuFreq.ReadFrequency(); }
+        catch (Exception ex) { Debug.WriteLine($"[SysMon] CpuFreq: {ex.Message}"); }
+
         // Push to sparkline charts for real-time trend visualization
         CpuChart.Push((float)snapshot.CpuUsage);
         MemChart.Push((float)snapshot.MemoryUsed);
@@ -256,19 +277,43 @@ public class SystemInfoService
         NetUpChart.PushRaw((float)(snapshot.NetUp / 1_000_000.0));
 
         Current = snapshot;
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref _isRefreshing, 0);
+        }
     }
+
+    private int _isRefreshing;
 
     // ===== CPU =====
     private double ReadCpuUsage()
     {
         try
         {
-            if (_cpuCounter is null) return 0;
-            return Math.Round(_cpuCounter.NextValue(), 1);
+            // H3: 懒重建 — 如果计数器为 null（之前异常销毁），尝试重新创建
+            PerformanceCounter? counter;
+            lock (_cpuCounterLock)
+            {
+                if (_cpuCounter is null)
+                {
+                    try { _cpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total"); }
+                    catch (Exception ex) { Debug.WriteLine($"[SysMon] CPU counter re-init failed: {ex.Message}"); return 0; }
+                }
+                counter = _cpuCounter;
+            }
+
+            return Math.Round(counter.NextValue(), 1);
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[SysMon] ReadCpuUsage: {ex.Message}");
+            // H3: 销毁损坏的计数器，下次调用时会重建
+            lock (_cpuCounterLock)
+            {
+                _cpuCounter?.Dispose();
+                _cpuCounter = null;
+            }
             return 0;
         }
     }

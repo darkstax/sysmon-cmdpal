@@ -68,26 +68,10 @@ public sealed class SharedMemoryReader : IDisposable
     private int _lastCounter;
     private bool _disposed;
 
-    // ---- P/Invoke for shared memory (FILE_MAP_COPY, no write) ----
+    // ---- 持久句柄 — 避免每次循环 OpenExisting/Dispose 的开销 ----
+    // L1: 已移除未使用的 P/Invoke 声明（OpenFileMapping/MapViewOfFile/UnmapViewOfFile/CloseHandle），
+    //     实际使用 managed MemoryMappedFile API。
 
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr OpenFileMapping(uint dwDesiredAccess, bool bInheritHandle, string lpName);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr MapViewOfFile(IntPtr hFileMappingObject, uint dwDesiredAccess,
-        uint dwFileOffsetHigh, uint dwFileOffsetLow, nuint dwNumberOfBytesToMap);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool UnmapViewOfFile(IntPtr lpBaseAddress);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CloseHandle(IntPtr hObject);
-
-    private const uint FILE_MAP_COPY = 0x0001;
-
-    // 持久句柄 — 避免每次循环 OpenExisting/Dispose 的开销
     private System.IO.MemoryMappedFiles.MemoryMappedFile? _mmf;
     private System.IO.MemoryMappedFiles.MemoryMappedViewAccessor? _accessor;
     private readonly byte[] _buffer = new byte[MapSize];
@@ -144,7 +128,8 @@ public sealed class SharedMemoryReader : IDisposable
         int counter = BitConverter.ToInt32(buf, OffCounter);
         if (counter == _lastCounter)
         {
-            BrokerPushReceiver.Instance.Ping();
+            // M2: counter 未变 = Broker 没有在写。不发 Ping，让 LastPing 自然过期，
+            // IsAlive 才能正确反映 Broker 是否存活。
             return;
         }
         _lastCounter = counter;

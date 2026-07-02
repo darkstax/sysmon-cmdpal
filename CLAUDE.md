@@ -14,7 +14,7 @@
 | COM Server | `Shmuelie.WinRTServer`（让 .NET WinExe 作为 WinRT/COM 扩展被 Command Palette 加载） |
 | Win32 互操作 | `Microsoft.Windows.CsWin32`（P/Invoke 源生成）+ `System.Diagnostics.PerformanceCounter` + `System.Management` |
 | IPC | `MemoryMappedFile` 16KB + `EventWaitHandle`（Broker→Plugin 单向推送） |
-| 硬件采集 | 主端：HWiNFO 共享内存 (`Global\HWiNFO_SENS_SM2`) + ACPI ThermalZone；Broker 端：`LibreHardwareMonitorLib 0.9.6` |
+| 硬件采集 | 主端：HWiNFO 共享内存 (`Global\HWiNFO_SENS_SM2`) + ACPI ThermalZone + D3DKMT (GPU 利用率) + PDH PerformanceCounter (GPU Engine)；Broker 端：`LibreHardwareMonitorLib 0.9.6` |
 | i18n | .resw 资源（en-US + zh-CN） |
 | 测试 | xUnit |
 | AOT/Trim | Release 配置开启 `PublishTrimmed` + `IsAotCompatible` + `CsWinRTAotOptimizerEnabled` |
@@ -27,21 +27,25 @@
     └──> Shared Memory v2 (16KB, SDDL ACL: Everyone 读 / Admin 写)
             │  + EventWaitHandle 通知
             ▼
-SysMonCmdPal.exe (MSIX 扩展, 用户态, 商店安全)
-    ├── SharedMemoryReader (后台线程) → BrokerPushReceiver (volatile 不可变快照, <10s 视为新鲜)
-    ├── 传感器三层回退链:
-    │     Tier 0: Broker SHM (LHM, 全量, 最高精度)
-    │     Tier 1: HWiNFO SHM (用户态, CPU/GPU 温度, ~12h 需重启)
-    │     Tier 2: ThermalZone (Windows ACPI PerformanceCounter, 精度差 5-15°C)
-    ├── SystemInfoService.Refresh() (1s 定时 → SystemSnapshot)
-    │     + CPU% (PerformanceCounter) / 内存 (GlobalMemoryStatusEx) / 磁盘 (DriveInfo + LogicalDisk) /
-    │       网络 (物理接口 delta + EMA) / 电池 (GetSystemPowerStatus)
+SysMonCmdPal.exe (MSIX 扩展, runFullTrust, 用户态)
+    ├── SharedMemoryReader (后台线程) → BrokerPushReceiver (lock 不可变快照, <10s 视为新鲜)
+    ├── 传感器五层回退链:
+    │     Tier 0: Broker SHM (LHM, 全量, 最高精度, 需管理员)
+    │     Tier 1: HWiNFO SHM (用户态, CPU/GPU 温度+利用率+显存, ~12h 需重启)
+    │     Tier 2: D3DKMT API (用户态, GPU 利用率, gdi32.dll P/Invoke, 无需管理员)
+    │     Tier 3: PDH PerformanceCounter (用户态, GPU Engine 计数器, 无需管理员)
+    │     CPU 温度: ThermalZone (Windows ACPI PerformanceCounter, 精度差 5-15°C)
+    ├── SystemInfoService.Refresh() (1s 定时 → SystemSnapshot, Interlocked 防并发)
+    │     + CPU% (PerformanceCounter, 异常自动重建) / CPU 频率 (基础频率 × 性能百分比 / 100)
+    │       内存 (GlobalMemoryStatusEx) / 磁盘 (DriveInfo + LogicalDisk, 物理磁盘缓存 30s)
+    │       网络 (物理接口 delta + EMA, 接口列表缓存 10s) / 电池 (GetSystemPowerStatus + WMI 趋势检测, 缓存 3s)
     ├── DockBandRefreshCoordinator (共享 1s timer, Interlocked.Exchange 防并发, 引用计数)
     │     → 7 个静态 Dock Band (CPU/内存/磁盘/下载/上传/电池/GPU) + 动态传感器 Band
-    └── Pages (8 个详情页, 按需 Markdown/ListPage 渲染)
+    │     所有详情页通过 Subscribe(Update) 共享此 timer (不再有独立 timer)
+    └── Pages (8 个详情页, 按需 FormContent/ListPage 渲染)
 ```
 
-**权限分层**：主扩展始终用户态、商店安全；仅可选 Broker 以管理员独立运行（不在 MSIX 内，独立分发），通过 SHM 把高精度数据"喂"回主扩展。Broker 缺席时主扩展自动降级到 HWiNFO→ThermalZone。
+**权限分层**：主扩展为 `runFullTrust`（Package.appxmanifest 声明），始终用户态运行。仅可选 Broker 以管理员独立运行（不在 MSIX 内，独立分发），通过 SHM 把高精度数据"喂"回主扩展。Broker 缺席时主扩展自动降级：HWiNFO → D3DKMT → PDH → ThermalZone。D3DKMT 和 PDH 完全不需要管理员权限或第三方工具。
 
 ## 2. 代码仓库文件结构
 
@@ -82,16 +86,24 @@ sysmon-cmdpal/
 │   │   ├── GpuDetailPage.cs          # GPU Markdown + VRAM + 后端状态
 │   │   └── SensorListPage.cs         # 全量传感器浏览（按类别分组）
 │   ├── Services/                 # 数据采集 + 回退链
-│   │   ├── SystemInfoService.cs      # 系统数据聚合器（1s Refresh → SystemSnapshot）
+│   │   ├── SystemInfoService.cs      # 系统数据聚合器（1s Refresh → SystemSnapshot, 加锁）
 │   │   ├── CpuSensorReader.cs        # CPU 温度三层回退
-│   │   ├── GpuSensorReader.cs        # GPU 数据三层回退
+│   │   ├── CpuFrequencyReader.cs     # CPU 频率 (任务管理器算法: base×perf%/100)
+│   │   ├── GpuSensorReader.cs        # GPU 数据五层回退
+│   │   ├── GpuAdapterEnumerator.cs   # DXGI COM interop 枚举 GPU adapter (LUID→名称, 缓存 30s)
+│   │   ├── D3dkmtGpuReader.cs        # D3DKMT API GPU 利用率 (gdi32.dll, per-engine RunningTime delta)
+│   │   ├── PdhGpuReader.cs           # PDH PerformanceCounter GPU 利用率 (GPU Engine 计数器)
 │   │   ├── HwinfoSharedMemoryReader.cs  # HWiNFO Global\HWiNFO_SENS_SM2 读取
-│   │   ├── ThermalZoneReader.cs      # Windows ACPI 热区 (PerformanceCounter)
-│   │   ├── DiskMonitor.cs            # 磁盘 IO 监控
-│   │   ├── NetworkMonitor.cs         # 网络流量监控
+│   │   ├── ThermalZoneReader.cs      # Windows ACPI 热区 (PerformanceCounter, 首值重试)
+│   │   ├── DiskMonitor.cs            # 磁盘 IO 监控 (物理磁盘 WMI 缓存 30s, 计数器异常重建)
+│   │   ├── NetworkMonitor.cs         # 网络流量监控 (接口列表缓存 10s, EMA 平滑)
+│   │   ├── BatteryQueryService.cs    # WMI 电池趋势检测 (缓存 3s, 双重供电判断)
+│   │   ├── BatteryReportService.cs   # WinRT 电池健康报告 (30天缓存)
+│   │   ├── SystemPowerReader.cs      # 系统功耗信息
+│   │   ├── PdChargerDetector.cs      # USB-C/PD 充电检测 (SetupAPI)
 │   │   ├── SensorLogger.cs           # 共享传感器日志
-│   │   └── SparklineChart.cs         # 纯托管 PNG 火花线渲染
-│   ├── Models/SensorChainConfig.cs   # 精简配置: PrecisionMode (Broker/None) + 版本
+│   │   └── SparklineChart.cs         # 纯托管 PNG/SVG 火花线渲染
+│   ├── Models/SensorChainConfig.cs   # 精简配置: 版本号 (PrecisionMode 设置已移除)
 │   ├── Localization/Loc.cs           # i18n 辅助
 │   ├── Strings/en-US/Resources.resw  # 英文资源
 │   ├── Strings/zh-CN/Resources.resw  # 中文资源

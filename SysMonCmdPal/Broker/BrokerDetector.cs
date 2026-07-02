@@ -17,7 +17,9 @@ public static class BrokerDetector
         try
         {
             var processes = Process.GetProcessesByName(BrokerProcessName);
-            return processes.Length > 0;
+            bool running = processes.Length > 0;
+            foreach (var p in processes) p.Dispose();
+            return running;
         }
         catch (Exception ex)
         {
@@ -32,7 +34,9 @@ public static class BrokerDetector
         try
         {
             var processes = Process.GetProcessesByName(BrokerProcessName);
-            return processes.Length > 0 ? processes[0].Id : -1;
+            int pid = processes.Length > 0 ? processes[0].Id : -1;
+            foreach (var p in processes) p.Dispose();
+            return pid;
         }
         catch { return -1; }
     }

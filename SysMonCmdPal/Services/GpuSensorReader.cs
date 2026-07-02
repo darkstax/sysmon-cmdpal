@@ -50,21 +50,49 @@ internal static class GpuSensorReader
             }
         }
 
-        // 3. ACPI ThermalZone（精度差，但聊胜于无）
+        // 3. ACPI ThermalZone — CPU 热区温度不能代表 GPU 温度，移除误导性回退
+        //    ThermalZone 只有 CPU 热区，没有独立 GPU 热区。把 CPU 温度标为 GPU 温度会误导用户。
+
+        // 4. D3DKMT API (用户态，无需管理员，无需第三方工具)
+        //    通过 gdi32.dll P/Invoke 读取 per-engine RunningTime，delta 计算 GPU 利用率
+        //    仅提供 UsagePercent，温度/显存不可用
         try
         {
-            if (ThermalZoneReader.Instance.IsAvailable)
+            var d3dkmt = D3dkmtGpuReader.Instance;
+            if (d3dkmt.IsAvailable)
             {
-                double temp = ThermalZoneReader.Instance.ReadCpuTemp();
-                if (temp > 0)
+                var results = d3dkmt.ReadAll();
+                if (results.Count > 0)
                 {
-                    return [new GpuResult("ACPI GPU", -1, temp, 0, 0, "ThermalZone")];
+                    SensorLogger.ForceLog("GPU: 使用 D3DKMT API (用户态, 无需管理员)");
+                    return results;
                 }
             }
         }
         catch (Exception ex)
         {
-            SensorLogger.ForceLog($"GPU ThermalZone 异常: {ex.Message}");
+            SensorLogger.ForceLog($"GPU D3DKMT 异常: {ex.Message}");
+        }
+
+        // 5. PDH PerformanceCounter (用户态，Windows 内置 GPU Engine 计数器)
+        //    由 DxgKrnl 驱动发布，通过 perflib 读取
+        //    仅提供 UsagePercent，温度/显存不可用
+        try
+        {
+            var pdh = PdhGpuReader.Instance;
+            if (pdh.IsAvailable)
+            {
+                var results = pdh.ReadAll();
+                if (results.Count > 0)
+                {
+                    SensorLogger.ForceLog("GPU: 使用 PDH PerformanceCounter (GPU Engine)");
+                    return results;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            SensorLogger.ForceLog($"GPU PDH 异常: {ex.Message}");
         }
 
         SensorLogger.ForceLog("GPU: 所有数据源不可用");
@@ -160,15 +188,19 @@ internal static class GpuSensorReader
                 "SELECT * FROM Win32_VideoController");
             foreach (var obj in searcher.Get())
             {
-                string name = obj["Name"] as string ?? "";
-                ulong ram = 0;
-                if (obj["AdapterRAM"] is uint r) ram = r;
-                if (!string.IsNullOrEmpty(name) &&
-                    !name.Contains("Virtual", StringComparison.OrdinalIgnoreCase) &&
-                    !name.Contains("Zako", StringComparison.OrdinalIgnoreCase))
+                try
                 {
-                    _gpuNamesByRamDesc.Add((name, ram));
+                    string name = obj["Name"] as string ?? "";
+                    ulong ram = 0;
+                    if (obj["AdapterRAM"] is uint r) ram = r;
+                    if (!string.IsNullOrEmpty(name) &&
+                        !name.Contains("Virtual", StringComparison.OrdinalIgnoreCase) &&
+                        !name.Contains("Zako", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _gpuNamesByRamDesc.Add((name, ram));
+                    }
                 }
+                finally { obj.Dispose(); }
             }
             // 按 RAM 从大到小排序——独显通常 RAM 更大
             _gpuNamesByRamDesc.Sort((a, b) => b.Ram.CompareTo(a.Ram));

@@ -112,8 +112,8 @@ internal sealed partial class DiskDetailPage : ListPage
 internal sealed partial class DiskPartitionsPage : ContentPage
 {
     private readonly PhysicalDiskInfo _disk;
-    private System.Timers.Timer? _refreshTimer;
     private readonly FormContent _form = new();
+    private bool _subscribed;
     private readonly SparklineChart _readChart = new(maxPoints: 60, metric: ChartMetric.Disk);
     private readonly SparklineChart _writeChart = new(maxPoints: 60, metric: ChartMetric.DiskWrite);
 
@@ -325,11 +325,10 @@ internal sealed partial class DiskPartitionsPage : ContentPage
 
     public void StartTimer()
     {
-        if (_refreshTimer != null) return;
+        if (_subscribed) return;
+        _subscribed = true;
+        DockBandRefreshCoordinator.Subscribe(Update);
         ThreadPool.QueueUserWorkItem(_ => Update());
-        _refreshTimer = new System.Timers.Timer(1000) { AutoReset = true };
-        _refreshTimer.Elapsed += (_, _) => Update();
-        _refreshTimer.Start();
     }
 
     public override IContent[] GetContent()
@@ -342,8 +341,9 @@ internal sealed partial class DiskPartitionsPage : ContentPage
     {
         try
         {
+            // P1: 不再调用 sys.Refresh() — 依赖 DockBandRefreshCoordinator 的 1s 统一刷新。
+            // 之前在这里直接调 Refresh() 导致与 coordinator 的 Refresh() 并发，WMI 查询翻倍。
             var sys = SystemInfoService.Instance;
-            sys.Refresh();
             var refreshed = sys.Current.PhysicalDisks;
             var disk = Array.Find(refreshed, d => d.Model == _disk.Model && d.SerialNumber == _disk.SerialNumber);
             if (disk.Model == null && disk.SerialNumber == null) disk = _disk;

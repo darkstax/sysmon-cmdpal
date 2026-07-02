@@ -134,16 +134,22 @@ public sealed class SparklineChart
     /// Pre-render the PNG from current data and cache it.
     /// Called from the 1s refresh loop so GetContent() never blocks on rendering.
     /// </summary>
-    private byte[]? _cachedPng;
+    // M8: thread-safe Prerender — use volatile + lock to prevent torn reads
+    private volatile byte[]? _cachedPng;
     private int _cachedCount = -1;
+    private readonly object _prerenderLock = new();
 
     public void Prerender()
     {
         int count = Count;
         // Only re-render if new data arrived
         if (count == _cachedCount && _cachedPng != null) return;
-        _cachedCount = count;
-        _cachedPng = ToPng();
+        lock (_prerenderLock)
+        {
+            if (count == _cachedCount && _cachedPng != null) return;
+            _cachedCount = count;
+            _cachedPng = ToPng();
+        }
     }
 
     /// <summary>
@@ -381,11 +387,11 @@ public sealed class SparklineChart
         float min = float.MaxValue, max = float.MinValue;
         foreach (var p in points) { if (p < min) min = p; if (p > max) max = p; }
         float range = max - min;
-        if (range < 5) { float mid = (min + max) / 2; min = Math.Max(0, mid - 5); max = Math.Min(100, mid + 5); }
+        if (range < 5) { float mid = (min + max) / 2; min = Math.Max(0, mid - 5); max = mid + 5; }
         if (max == min) max = min + 1;
         float pad = range * 0.12f;
         min = Math.Max(0, min - pad);
-        max = Math.Min(100, max + pad);
+        max = max + pad;
         if (max == min) max = min + 1;
 
         // Map data points to pixel coords

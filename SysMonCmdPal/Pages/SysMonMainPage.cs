@@ -32,23 +32,7 @@ internal sealed partial class SysMonMainPage : ListPage
         Icon = new IconInfo("");       // LightningBolt
         Title = Loc.Get("MainPage.Title");
         Name = "Open";
-
-        // 启动 10 秒后预渲染详情页 — 用户点进去就能立刻看到数据
-        var preWarmTimer = new System.Timers.Timer(10000) { AutoReset = false };
-        preWarmTimer.Elapsed += (_, _) =>
-        {
-            try
-            {
-                _cpuPage.StartTimer();
-                _memPage.StartTimer();
-                _batPage.StartTimer();
-                _netPage.StartTimer();
-                _gpuPage.StartTimer();
-                _diskPage.StartTimer();
-            }
-            catch { }
-        };
-        preWarmTimer.Start();
+        // P2: 不再需要 preWarmTimer — 详情页在 GetContent() 时自动订阅 DockBandRefreshCoordinator
     }
 
     public override IListItem[] GetItems()

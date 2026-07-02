@@ -114,7 +114,9 @@ internal sealed class HwinfoSharedMemoryReader : IDisposable
                 _entrySize = _accessor.ReadInt32(HdrEntrySize * 4);
                 _entryCount = _accessor.ReadInt32(HdrEntryCount * 4);
 
-                if (_entrySize < 160 || _entryOffset <= 0 || _entryCount <= 0)
+                if (_entrySize < 160 || _entrySize > 1024 ||
+                    _entryOffset <= 0 || _entryOffset > 65536 ||
+                    _entryCount <= 0 || _entryCount > 4096)
                 {
                     Debug.WriteLine($"[HWiNFO] Invalid layout: offset={_entryOffset} size={_entrySize} count={_entryCount}");
                     Cleanup();

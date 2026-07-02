@@ -16,16 +16,6 @@ public partial class SysMonCommandsProvider : CommandProvider
 
     private readonly ICommandItem _rootCommand;
 
-    // 高精度模式（简化为 Broker / 无 二选一）
-    private readonly ChoiceSetSetting _precisionModeSetting;
-
-    // 精度模式选项（仅 Broker / 无）
-    private static readonly List<ChoiceSetSetting.Choice> PrecisionChoices =
-    [
-        new(Loc.Get("Provider.PrecisionChoiceBroker"), "Broker"),
-        new(Loc.Get("Provider.PrecisionChoiceNone"), "None"),
-    ];
-
     public SysMonCommandsProvider()
     {
         Id = "SysMonCmdPal";
@@ -33,21 +23,9 @@ public partial class SysMonCommandsProvider : CommandProvider
         Icon = new IconInfo(""); // LightningBolt
         Frozen = false;
 
-        // 从文件加载完整配置
-        var savedConfig = SensorChainConfig.Load();
-
-        // 高精度模式（仅 Broker/None）
-        _precisionModeSetting = new ChoiceSetSetting(
-            "precisionMode",
-            Loc.Get("Provider.PrecisionModeLabel"),
-            Loc.Get("Provider.PrecisionModeDescription"),
-            PrecisionChoices)
-        { Value = savedConfig.PrecisionModeStr, IgnoreUnknownValue = true };
-
-        var settingsObj = new Settings();
-        settingsObj.Add(_precisionModeSetting);
-        settingsObj.SettingsChanged += OnSettingsChanged;
-        Settings = settingsObj;
+        // M11: PrecisionMode 设置已移除 — 传感器回退链自动选择最优数据源
+        // (Broker → HWiNFO → ThermalZone)，无需用户手动切换。
+        Settings = new Settings();
 
         _rootCommand = new CommandItem(new SysMonMainPage())
         {
@@ -88,17 +66,6 @@ public partial class SysMonCommandsProvider : CommandProvider
                 return band;
         }
         return null;
-    }
-
-    // ==================== Settings persistence ====================
-
-    private void OnSettingsChanged(object sender, Settings args)
-    {
-        var config = SensorChainConfig.Load();
-        config.PrecisionModeStr = _precisionModeSetting.Value ?? "Broker";
-        config.Save();
-
-        SensorLogger.ForceLog($"[Settings] 已保存: 精度模式={config.PrecisionModeStr}");
     }
 
     public override void Dispose()

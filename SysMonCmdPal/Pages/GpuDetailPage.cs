@@ -91,8 +91,8 @@ internal sealed partial class GpuDetailPage : ListPage
 internal sealed partial class GpuItemPage : ContentPage
 {
     private readonly int _gpuIndex;
-    private System.Timers.Timer? _refreshTimer;
     private readonly FormContent _form = new();
+    private bool _subscribed;
     private readonly SparklineChart _usageChart;
     private readonly SparklineChart _memChart;
 
@@ -286,11 +286,10 @@ internal sealed partial class GpuItemPage : ContentPage
 
     public void StartTimer()
     {
-        if (_refreshTimer != null) return;
+        if (_subscribed) return;
+        _subscribed = true;
+        DockBandRefreshCoordinator.Subscribe(Update);
         ThreadPool.QueueUserWorkItem(_ => Update());
-        _refreshTimer = new System.Timers.Timer(1000) { AutoReset = true };
-        _refreshTimer.Elapsed += (_, _) => Update();
-        _refreshTimer.Start();
     }
 
     public override IContent[] GetContent()

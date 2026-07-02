@@ -119,20 +119,31 @@ public sealed class BrokerSharedMemory : IDisposable
         if (_hMap == IntPtr.Zero)
             throw new System.ComponentModel.Win32Exception();
 
-        ApplySecurityDescriptor();
-
-        _event = new EventWaitHandle(false, EventResetMode.AutoReset, EventName);
-
-        // Map a write view — persistent for the lifetime of this object.
-        _pView = MapViewOfFile(_hMap, FILE_MAP_WRITE, 0, 0, (nuint)MapSize);
-        if (_pView == IntPtr.Zero)
-            throw new System.ComponentModel.Win32Exception();
-
-        unsafe
+        try
         {
-            byte* p = (byte*)_pView;
-            *(int*)(p + OffMagic) = MagicValue;
-            *(int*)(p + OffVersion) = MapVersion;
+            ApplySecurityDescriptor();
+
+            _event = new EventWaitHandle(false, EventResetMode.AutoReset, EventName);
+
+            // Map a write view — persistent for the lifetime of this object.
+            _pView = MapViewOfFile(_hMap, FILE_MAP_WRITE, 0, 0, (nuint)MapSize);
+            if (_pView == IntPtr.Zero)
+                throw new System.ComponentModel.Win32Exception();
+
+            unsafe
+            {
+                byte* p = (byte*)_pView;
+                *(int*)(p + OffMagic) = MagicValue;
+                *(int*)(p + OffVersion) = MapVersion;
+            }
+        }
+        catch
+        {
+            // M7: 构造函数异常时释放已创建的资源
+            if (_pView != IntPtr.Zero) { UnmapViewOfFile(_pView); _pView = IntPtr.Zero; }
+            if (_hMap != IntPtr.Zero) { CloseHandle(_hMap); _hMap = IntPtr.Zero; }
+            _event?.Dispose();
+            throw;
         }
     }
 
@@ -211,12 +222,19 @@ public sealed class BrokerSharedMemory : IDisposable
             dest[i] = 0;
         if (string.IsNullOrEmpty(value)) return;
         var bytes = Encoding.UTF8.GetBytes(value);
-        int len = Math.Min(bytes.Length, maxBytes - 1);
-        if (bytes.Length > maxBytes - 1)
+        if (bytes.Length <= maxBytes - 1)
         {
-            System.Diagnostics.Debug.WriteLine(
-                $"[SHM] WriteString truncated: input={bytes.Length}B, buffer={maxBytes - 1}B, value='{value}'");
+            for (int i = 0; i < bytes.Length; i++)
+                dest[i] = bytes[i];
+            return;
         }
+        // L2: UTF-8 安全截断 — 回退到最后一个完整字符边界，避免产生无效 UTF-8
+        int len = maxBytes - 1;
+        // UTF-8 后续字节以 10xxxxxx 开头，回退到非后续字节
+        while (len > 0 && (bytes[len] & 0xC0) == 0x80)
+            len--;
+        System.Diagnostics.Debug.WriteLine(
+            $"[SHM] WriteString truncated: input={bytes.Length}B, safe={len}B, value='{value}'");
         for (int i = 0; i < len; i++)
             dest[i] = bytes[i];
     }

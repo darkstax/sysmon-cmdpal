@@ -53,13 +53,25 @@ internal sealed class ThermalZoneReader
                 try
                 {
                     var counter = new PerformanceCounter("Thermal Zone Information", "Temperature", name, true);
-                    // 尝试读取一次，确认实例有效
+                    // NextValue() returns 0 on first call for some counter types.
+                    // Warm up: read once, discard, then sleep briefly and read again.
+                    counter.NextValue();
+                    System.Threading.Thread.Sleep(100);
                     float val = counter.NextValue();
-                    if (val > 200 && val < 500) // 合理的开尔文温度范围
+                    if (val >= 200 && val <= 500) // 合理的开尔文温度范围 (0K=−273°C invalid, include bounds)
                     {
                         _counter = counter;
                         _available = true;
                         Log($"InitCounter: SUCCESS — instance '{name}', value={val}K ({val - 273.15:F1}°C)");
+                        return;
+                    }
+                    // Second chance: some counters need two reads. Accept if instance exists
+                    // and returns any non-negative value; ReadCpuTemp will validate per-call.
+                    if (val >= 0)
+                    {
+                        _counter = counter;
+                        _available = true;
+                        Log($"InitCounter: ACCEPTED (warm-up) — instance '{name}', first val={val}K, will validate on read");
                         return;
                     }
                     counter.Dispose();
@@ -80,12 +92,21 @@ internal sealed class ThermalZoneReader
                     try
                     {
                         var counter = new PerformanceCounter("Thermal Zone Information", "Temperature", inst, true);
+                        counter.NextValue();
+                        System.Threading.Thread.Sleep(100);
                         float val = counter.NextValue();
-                        if (val > 200 && val < 500)
+                        if (val >= 200 && val <= 500)
                         {
                             _counter = counter;
                             _available = true;
                             Log($"InitCounter: SUCCESS (enumerated) — instance '{inst}', value={val}K ({val - 273.15:F1}°C)");
+                            return;
+                        }
+                        if (val >= 0)
+                        {
+                            _counter = counter;
+                            _available = true;
+                            Log($"InitCounter: ACCEPTED (enumerated, warm-up) — instance '{inst}', first val={val}K");
                             return;
                         }
                         counter.Dispose();

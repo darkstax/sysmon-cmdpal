@@ -10,8 +10,8 @@ namespace SysMonCmdPal;
 
 internal sealed partial class CpuDetailPage : ContentPage
 {
-    private System.Timers.Timer? _refreshTimer;
     private readonly FormContent _form = new();
+    private bool _subscribed;
 
     private const string Template = """
     {
@@ -39,20 +39,53 @@ internal sealed partial class CpuDetailPage : ContentPage
           "spacing": "Medium",
           "items": [
             {
-              "type": "TextBlock",
-              "text": "${cpuUsage}",
-              "size": "Large",
-              "weight": "Bolder",
-              "horizontalAlignment": "Center",
-              "spacing": "Small"
-            },
-            {
-              "type": "TextBlock",
-              "text": "使用率",
-              "size": "Small",
-              "isSubtle": true,
-              "horizontalAlignment": "Center",
-              "spacing": "None"
+              "type": "ColumnSet",
+              "columns": [
+                {
+                  "type": "Column",
+                  "width": "stretch",
+                  "items": [
+                    {
+                      "type": "TextBlock",
+                      "text": "${cpuUsage}",
+                      "size": "Large",
+                      "weight": "Bolder",
+                      "horizontalAlignment": "Center",
+                      "spacing": "Small"
+                    },
+                    {
+                      "type": "TextBlock",
+                      "text": "使用率",
+                      "size": "Small",
+                      "isSubtle": true,
+                      "horizontalAlignment": "Center",
+                      "spacing": "None"
+                    }
+                  ]
+                },
+                {
+                  "type": "Column",
+                  "width": "stretch",
+                  "items": [
+                    {
+                      "type": "TextBlock",
+                      "text": "${cpuFreq}",
+                      "size": "Large",
+                      "weight": "Bolder",
+                      "horizontalAlignment": "Center",
+                      "spacing": "Small"
+                    },
+                    {
+                      "type": "TextBlock",
+                      "text": "频率 (MHz)",
+                      "size": "Small",
+                      "isSubtle": true,
+                      "horizontalAlignment": "Center",
+                      "spacing": "None"
+                    }
+                  ]
+                }
+              ]
             }
           ]
         },
@@ -147,17 +180,15 @@ internal sealed partial class CpuDetailPage : ContentPage
         Name = "CPU";
         _form.TemplateJson = Template;
         // Initial placeholder data so FormContent has valid DataJson before first Update
-        _form.DataJson = """{"cpuName":"—","cpuUsage":"—","cpuCores":"—","cpuTemp":"—","backend":"—","chartUrl":""}""";
+        _form.DataJson = """{"cpuName":"—","cpuUsage":"—","cpuCores":"—","cpuTemp":"—","backend":"—","chartUrl":"","cpuFreq":"—"}""";
     }
 
     public void StartTimer()
     {
-        if (_refreshTimer != null) return;
-        // First update on ThreadPool — never on COM thread
+        if (_subscribed) return;
+        _subscribed = true;
+        DockBandRefreshCoordinator.Subscribe(Update);
         ThreadPool.QueueUserWorkItem(_ => Update());
-        _refreshTimer = new System.Timers.Timer(1000) { AutoReset = true };
-        _refreshTimer.Elapsed += (_, _) => Update();
-        _refreshTimer.Start();
     }
 
     public override IContent[] GetContent()
@@ -185,6 +216,9 @@ internal sealed partial class CpuDetailPage : ContentPage
                     : (info.BackendNote ?? Loc.Get("Common.Unavailable")),
                 ["backend"] = BackendLabel(info.Backend),
                 ["chartUrl"] = SystemInfoService.Instance.CpuChart.ToSvgDataUri(canvasWidth: 500) ?? "",
+                ["cpuFreq"] = info.CpuFrequency >= 0
+                    ? $"{info.CpuFrequency:F0}"
+                    : "—",
             };
 
             _form.DataJson = JsonHelper.ToJson(data);

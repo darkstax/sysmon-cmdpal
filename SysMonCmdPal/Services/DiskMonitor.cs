@@ -17,6 +17,11 @@ internal sealed class DiskMonitor
     private readonly Dictionary<string, (PerformanceCounter? Read, PerformanceCounter? Write)> _diskIOCounters = new();
     private readonly object _diskIOLock = new();
 
+    // P3: 缓存物理磁盘查询 30 秒 — 物理磁盘结构极少变化（热插拔除外）
+    private PhysicalDiskInfo[]? _cachedPhysicalDisks;
+    private DateTime _physDiskCacheTime = DateTime.MinValue;
+    private static readonly TimeSpan PhysDiskCacheTtl = TimeSpan.FromSeconds(30);
+
     public DiskInfo[] Read()
     {
         try
@@ -61,12 +66,21 @@ internal sealed class DiskMonitor
     /// </summary>
     public PhysicalDiskInfo[] ReadPhysicalDisks(DiskInfo[] logicalDisks)
     {
+        // P3: 30 秒缓存 — 物理磁盘结构极少变化
+        if (_cachedPhysicalDisks != null && (DateTime.UtcNow - _physDiskCacheTime) < PhysDiskCacheTtl)
+        {
+            // 仍需更新 IO 速度（从最新的逻辑磁盘数据汇总）
+            UpdatePhysicalDiskIO(_cachedPhysicalDisks, logicalDisks);
+            return _cachedPhysicalDisks;
+        }
+
         try
         {
-            // 1. 查询所有物理磁盘
+            // 1. 查询所有物理磁盘（P3: 合并 DeviceID 到第一次查询，消除重复 WMI 调用）
             var physDisks = new List<PhysicalDiskInfo>();
+            var diskDeviceIds = new List<string>();
             using (var searcher = new ManagementObjectSearcher(
-                "SELECT Model, SerialNumber, Size, InterfaceType, Index, PNPDeviceID, MediaType FROM Win32_DiskDrive"))
+                "SELECT Model, SerialNumber, Size, InterfaceType, Index, PNPDeviceID, MediaType, DeviceID FROM Win32_DiskDrive"))
             using (var collection = searcher.Get())
             {
                 foreach (ManagementObject disk in collection)
@@ -80,6 +94,7 @@ internal sealed class DiskMonitor
                         var pnpId = disk["PNPDeviceID"] as string ?? "";
                         var iface = disk["InterfaceType"] as string ?? "";
                         var mediaType = disk["MediaType"] as string ?? "";
+                        var devId = disk["DeviceID"] as string ?? "";
 
                         var pdi = new PhysicalDiskInfo
                         {
@@ -92,33 +107,13 @@ internal sealed class DiskMonitor
                             WriteBytesPerSec = 0,
                         };
                         physDisks.Add(pdi);
+                        diskDeviceIds.Add(devId);
                     }
                     finally { disk.Dispose(); }
                 }
             }
 
             if (physDisks.Count == 0) return [];
-
-            // 2. 查询 Win32_DiskDriveToDiskPartition 关联表，建立 物理磁盘 DeviceID → 分区 列表
-            //    ASSOCIATORS OF {Win32_DiskDrive.Index=N} 语法无效，必须用 DeviceID
-            var diskDeviceIds = new string[physDisks.Count];
-            // 需要重新查 DeviceID（第一次查询没取这个字段）
-            using (var idSearcher = new ManagementObjectSearcher(
-                "SELECT Index, DeviceID FROM Win32_DiskDrive"))
-            using (var idCollection = idSearcher.Get())
-            {
-                foreach (ManagementObject disk in idCollection)
-                {
-                    try
-                    {
-                        var idx = disk["Index"] as uint? ?? 0;
-                        var devId = disk["DeviceID"] as string ?? "";
-                        if ((int)idx < diskDeviceIds.Length)
-                            diskDeviceIds[(int)idx] = devId;
-                    }
-                    finally { disk.Dispose(); }
-                }
-            }
 
             var diskToPartitions = new Dictionary<int, List<string>>(); // physDiskIndex → partition DeviceIDs
             for (int i = 0; i < physDisks.Count; i++)
@@ -204,12 +199,37 @@ internal sealed class DiskMonitor
                 physDisks[i] = pdi;
             }
 
-            return physDisks.ToArray();
+            var result = physDisks.ToArray();
+            _cachedPhysicalDisks = result;
+            _physDiskCacheTime = DateTime.UtcNow;
+            return result;
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[SysMon] ReadPhysicalDisks: {ex.Message}");
             return [];
+        }
+    }
+
+    /// <summary>P3: 缓存命中时只更新 IO 速度（从最新逻辑磁盘数据汇总）</summary>
+    private static void UpdatePhysicalDiskIO(PhysicalDiskInfo[] disks, DiskInfo[] logicalDisks)
+    {
+        for (int i = 0; i < disks.Length; i++)
+        {
+            double readSum = 0, writeSum = 0;
+            foreach (var p in disks[i].Partitions)
+            {
+                var matchIdx = Array.FindIndex(logicalDisks, d => string.Equals(d.Name, p.Name, StringComparison.OrdinalIgnoreCase));
+                if (matchIdx >= 0)
+                {
+                    if (logicalDisks[matchIdx].ReadBytesPerSec > 0) readSum += logicalDisks[matchIdx].ReadBytesPerSec;
+                    if (logicalDisks[matchIdx].WriteBytesPerSec > 0) writeSum += logicalDisks[matchIdx].WriteBytesPerSec;
+                }
+            }
+            var pdi = disks[i];
+            pdi.ReadBytesPerSec = readSum;
+            pdi.WriteBytesPerSec = writeSum;
+            disks[i] = pdi;
         }
     }
 
@@ -225,10 +245,34 @@ internal sealed class DiskMonitor
             }
         }
 
+        // M6 + L5: 异常时销毁并移除计数器，下次调用会重建。
+        // 首次 NextValue() 返回 0 是正常的，不当作异常处理。
         try { di.ReadBytesPerSec = counters.Read?.NextValue() ?? -1; }
-        catch (Exception ex) { Debug.WriteLine($"[SysMon] Disk read IO ({driveLetter}): {ex.Message}"); }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[SysMon] Disk read IO ({driveLetter}): {ex.Message}");
+            InvalidateDiskCounter(driveLetter);
+        }
         try { di.WriteBytesPerSec = counters.Write?.NextValue() ?? -1; }
-        catch (Exception ex) { Debug.WriteLine($"[SysMon] Disk write IO ({driveLetter}): {ex.Message}"); }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[SysMon] Disk write IO ({driveLetter}): {ex.Message}");
+            InvalidateDiskCounter(driveLetter);
+        }
+    }
+
+    /// <summary>M6: 销毁并移除损坏的磁盘 IO 计数器，下次读取时重建</summary>
+    private void InvalidateDiskCounter(string driveLetter)
+    {
+        lock (_diskIOLock)
+        {
+            if (_diskIOCounters.TryGetValue(driveLetter, out var c))
+            {
+                c.Read?.Dispose();
+                c.Write?.Dispose();
+                _diskIOCounters.Remove(driveLetter);
+            }
+        }
     }
 
     private static PerformanceCounter? CreateIOCounter(string drive, string rw)
@@ -319,7 +363,8 @@ internal sealed class DiskMonitor
             {
                 using var searcher = new ManagementObjectSearcher(
                     "SELECT * FROM Win32_PnPEntity WHERE DeviceID LIKE '%THUNDERBOLT%' OR DeviceID LIKE '%TBT%' OR PNPClass = 'ThunderboltController'");
-                _hasThunderboltCache = searcher.Get().Count > 0;
+                using var coll = searcher.Get(); // L4: dispose ManagementObjectCollection
+                _hasThunderboltCache = coll.Count > 0;
             }
             catch { _hasThunderboltCache = false; }
             return _hasThunderboltCache.Value;

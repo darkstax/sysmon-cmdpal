@@ -149,7 +149,7 @@ public sealed class SensorCollector : IDisposable
         {
             var ht = hw.HardwareType;
             bool isCpu = ht == HardwareType.Cpu;
-            bool isGpu = ht == HardwareType.GpuNvidia || ht == HardwareType.GpuAmd;
+            bool isGpu = ht == HardwareType.GpuNvidia || ht == HardwareType.GpuAmd || ht == HardwareType.GpuIntel;
 
             try { hw.Update(); }
             catch { continue; }

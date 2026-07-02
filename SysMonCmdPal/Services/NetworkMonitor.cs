@@ -58,9 +58,21 @@ internal sealed class NetworkMonitor
         }
     }
 
+    // P5: 缓存物理接口列表 10 秒 — 接口很少变化，避免每秒全量枚举
+    private static List<NetworkInterface>? _cachedInterfaces;
+    private static DateTime _interfaceCacheTime = DateTime.MinValue;
+    private static readonly object _ifaceCacheLock = new();
+    private static readonly TimeSpan InterfaceCacheTtl = TimeSpan.FromSeconds(10);
+
     /// <summary>只保留物理硬件接口（真实网卡），排除虚拟/隧道/蓝牙/filter driver 绑定</summary>
     public static List<NetworkInterface> GetPhysicalInterfaces()
     {
+        lock (_ifaceCacheLock)
+        {
+            if (_cachedInterfaces != null && (DateTime.UtcNow - _interfaceCacheTime) < InterfaceCacheTtl)
+                return _cachedInterfaces;
+        }
+
         var result = new List<NetworkInterface>();
         foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
         {
@@ -99,6 +111,11 @@ internal sealed class NetworkMonitor
                 continue;
 
             result.Add(ni);
+        }
+        lock (_ifaceCacheLock)
+        {
+            _cachedInterfaces = result;
+            _interfaceCacheTime = DateTime.UtcNow;
         }
         return result;
     }
