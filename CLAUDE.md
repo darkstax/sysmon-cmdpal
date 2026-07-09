@@ -169,7 +169,7 @@ dotnet run --project LhmTest\LhmTest.csproj
 
 **部署期管理员操作**（部署/停止 Broker）：已配置 `gsudo`（缓存 5 分钟），用 `sudo` 而非反复弹 UAC：
 ```powershell
-sudo Get-Process SysMonBroker | Stop-Process -Force
-sudo Copy-Item publish\SysMonBroker.exe "$env:LOCALAPPDATA\SysMonBroker\SysMonBroker.exe" -Force
-sudo Start-Process "$env:LOCALAPPDATA\SysMonBroker\SysMonBroker.exe"
+gsudo Get-Process SysMonBroker | Stop-Process -Force
+gsudo Copy-Item publish\SysMonBroker.exe "$env:LOCALAPPDATA\SysMonBroker\SysMonBroker.exe" -Force
+gsudo Start-Process "$env:LOCALAPPDATA\SysMonBroker\SysMonBroker.exe"
 ```
