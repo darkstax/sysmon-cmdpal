@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+
+  <PropertyGroup>
+    <CmdPalSDKDir>$(MSBuildThisFileDirectory).nuget\packages\microsoft.commandpalette.extensions\</CmdPalSDKDir>
+  </PropertyGroup>
+
+  <!-- AOT/Trim: 仅在 Release + Windows 上启用 -->
+  <PropertyGroup>
+    <PublishTrimmed Condition="'$(Configuration)' == 'Release' and $([MSBuild]::IsOSPlatform('Windows'))">true</PublishTrimmed>
+    <PublishTrimmed Condition="!$([MSBuild]::IsOSPlatform('Windows'))">false</PublishTrimmed>
+    <IsAotCompatible Condition="'$(Configuration)' == 'Release' and $([MSBuild]::IsOSPlatform('Windows'))">true</IsAotCompatible>
+    <IsAotCompatible Condition="!$([MSBuild]::IsOSPlatform('Windows'))">false</IsAotCompatible>
+    <CsWinRTAotOptimizerEnabled Condition="'$(Configuration)' == 'Release' and $([MSBuild]::IsOSPlatform('Windows'))">true</CsWinRTAotOptimizerEnabled>
+    <CsWinRTAotOptimizerEnabled Condition="!$([MSBuild]::IsOSPlatform('Windows'))">false</CsWinRTAotOptimizerEnabled>
+  </PropertyGroup>
+
+  <!-- InternalsVisibleTo: Test project -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>SysMonCmdPal.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

@@ -1,3 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
@@ -8,83 +9,54 @@
     <Platforms>x64;ARM64</Platforms>
     <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <UseWinUI>false</UseWinUI>
-    <EnableMsixTooling>true</EnableMsixTooling>
-    <GenerateAppxPackageOnBuild>true</GenerateAppxPackageOnBuild>
+
+    <!-- MSIX 打包：仅 Windows 环境启用 -->
+    <EnableMsixTooling Condition="$([MSBuild]::IsOSPlatform('Windows'))">true</EnableMsixTooling>
+    <GenerateAppxPackageOnBuild Condition="$([MSBuild]::IsOSPlatform('Windows'))">true</GenerateAppxPackageOnBuild>
+    <AppxPackage Condition="!$([MSBuild]::IsOSPlatform('Windows'))">false</AppxPackage>
+    <EnableDefaultWindowsAppSdkContentItems Condition="!$([MSBuild]::IsOSPlatform('Windows'))">false</EnableDefaultWindowsAppSdkContentItems>
+
     <PackageCertificateKeyFile>SysPulse_TemporaryKey.pfx</PackageCertificateKeyFile>
     <PackageCertificateThumbprint>740708ED2D4E9772D7A45EBE481F80C1CC325790</PackageCertificateThumbprint>
     <PackageCertificatePassword>SysPulse</PackageCertificatePassword>
     <PublishProfile>win-$(Platform).pubxml</PublishProfile>
+
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>preview</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
-    <!-- i18n: default language + PRI generation -->
+    <!-- i18n -->
     <DefaultLanguage>en-US</DefaultLanguage>
-    <GenerateResourceUsePreserializedResources>true</GenerateResourceUsePreserializedResources>
+    <GenerateResourceUsePreserializedResources Condition="$([MSBuild]::IsOSPlatform('Windows'))">true</GenerateResourceUsePreserializedResources>
 
-    <!-- 程序集元数据 -->
+    <!-- 元数据 -->
     <Company>darkstax</Company>
-    <Product>SysMonCmdPal - System Monitor for PowerToys Command Palette</Product>
-    <Description>PowerToys Command Palette 系统监控扩展：CPU/内存/磁盘/网络/电池/GPU/传感器实时数据</Description>
+    <Product>SysMonCmdPal</Product>
+    <Description>PowerToys Command Palette 系统监控扩展</Description>
     <Copyright>Copyright (c) 2026 darkstax</Copyright>
     <AssemblyVersion>1.5.0.0</AssemblyVersion>
     <FileVersion>1.5.0.0</FileVersion>
     <Version>1.5.0.0</Version>
-
-    <!-- AOT/Trim for Release -->
-    <PublishTrimmed Condition="'$(Configuration)' == 'Release'">true</PublishTrimmed>
-    <IsAotCompatible Condition="'$(Configuration)' == 'Release'">true</IsAotCompatible>
-    <CsWinRTAotOptimizerEnabled Condition="'$(Configuration)' == 'Release'">true</CsWinRTAotOptimizerEnabled>
-  </PropertyGroup>
-
-  <!-- Test visibility -->
-  <ItemGroup>
-    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
-      <_Parameter1>SysMonCmdPal.Tests</_Parameter1>
-    </AssemblyAttribute>
-  </ItemGroup>
-
-  <!-- ============================================================
-       SDK 来源：需要本地 PowerToys 仓库提供扩展 SDK
-       克隆到与本项目同级的目录：
-         git clone https://github.com/microsoft/PowerToys.git ../PowerToys
-       或者设置环境变量 POWERTOYS_REPO 指向已克隆的仓库
-       ============================================================ -->
-  <PropertyGroup>
-    <PowerToysRepo Condition="'$(POWERTOYS_REPO)' != ''">$(POWERTOYS_REPO)</PowerToysRepo>
-    <PowerToysRepo Condition="'$(PowerToysRepo)' == ''">$(MSBuildThisFileDirectory)..\..\PowerToys</PowerToysRepo>
-    <PowerToysRepo Condition="!Exists('$(PowerToysRepo)\src\modules\cmdpal\extensionsdk')">$(MSBuildThisFileDirectory)..\PowerToys-sdk</PowerToysRepo>
-    <ExtensionsSdkDir>$(PowerToysRepo)\src\modules\cmdpal\extensionsdk</ExtensionsSdkDir>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- 本地 Toolkit 项目引用替代了 NuGet 包，避免类型冲突 -->
-    <PackageReference Include="Shmuelie.WinRTServer" Version="1.0.0" />
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.250205002" />
-    <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.162">
+    <PackageReference Include="Microsoft.CommandPalette.Extensions" />
+    <PackageReference Include="Shmuelie.WinRTServer" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" />
+    <PackageReference Include="Microsoft.Windows.CsWin32">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
     </PackageReference>
-    <!-- .NET 10 将 PerformanceCounter 拆分成了独立 NuGet 包 -->
-    <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="9.0.0" />
-    <PackageReference Include="System.Management" Version="9.0.0" />
-    <PackageReference Include="System.Text.Json" Version="9.0.0" />
+    <PackageReference Include="System.Diagnostics.PerformanceCounter" />
+    <PackageReference Include="System.Management" VersionOverride="9.0.0" />
+    <PackageReference Include="System.Text.Json" />
   </ItemGroup>
 
-  <ItemGroup>
-    <ProjectReference Include="$(ExtensionsSdkDir)\Microsoft.CommandPalette.Extensions.Toolkit\Microsoft.CommandPalette.Extensions.Toolkit.csproj" />
-  </ItemGroup>
-
-  <!-- Public folder for CmdPal AppExtension metadata -->
+  <!-- CmdPal AppExtension metadata -->
   <ItemGroup>
     <Content Include="Public\manifest.json" />
   </ItemGroup>
-
-  <!-- Broker: 独立分发，不包含在 MSIX 包中 -->
-  <!-- <ItemGroup>
-    <Content Include="Broker\SysMonBroker.exe" Condition="Exists('Broker\SysMonBroker.exe')" />
-  </ItemGroup> -->
 
   <!-- Assets -->
   <ItemGroup>
@@ -100,4 +72,3 @@
   </ItemGroup>
 
 </Project>
-
