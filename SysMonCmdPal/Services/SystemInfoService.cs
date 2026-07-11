@@ -1,13 +1,12 @@
 // Copyright (c) 2026 SysMonCmdPal
 // 系统信息采集服务 — 使用 Win32 API (P/Invoke) 获取基础指标。
-// 温度和 GPU 数据委托给 LhmSensorService（PawnIO 驱动，免管理员）。
-// 回退链: LHM NuGet (NVAPI) → LHM WMI (外部进程) → AMD ADL (PMLOG) → HWiNFO 共享内存 → 不可用
+// 温度和 GPU 数据委托给 CpuSensorReader / GpuSensorReader。
+// 网络采集委托给 NetworkMonitor，磁盘采集委托给 DiskMonitor。
+// 精简版: Broker 共享内存推送 + ThermalZone 作为回退
 
 using System;
 using System.Diagnostics;
-using System.IO;
 using System.Linq;
-using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 
 namespace SysMonCmdPal;
@@ -15,24 +14,12 @@ namespace SysMonCmdPal;
 /// <summary>传感器后端状态 — 表示当前使用哪个数据源</summary>
 public enum SensorBackend
 {
-    /// <summary>PawnIO Intel MSR (ring0 模块)</summary>
-    PawnMsr,
-    /// <summary>PawnIO AMD SMU (ring0 模块)</summary>
-    PawnSmu,
-    /// <summary>NVIDIA NVAPI (nvapi64.dll)</summary>
-    Nvapi,
-    /// <summary>AMD ADL (atiadlxx.dll) — GPU 数据</summary>
-    AdlGpu,
-    /// <summary>Intel IGCL (igcl.dll)</summary>
-    Igcl,
-    /// <summary>LibreHardwareMonitor (PawnIO 驱动)</summary>
-    Lhm,
-    /// <summary>LHM 外部进程 WMI Provider</summary>
-    LhmWmi,
-    /// <summary>AMD ADL PMLOG (atiadlxx.dll) — CPU 温度</summary>
-    AmdAdl,
-    /// <summary>HWiNFO 共享内存 (Global\HWiNFO_SENS_SM2)</summary>
-    HwInfo,
+    /// <summary>Broker 共享内存推送（最精准）</summary>
+    Broker,
+    /// <summary>HWiNFO 共享内存（用户态，每 ~12h 需重启 HWiNFO）</summary>
+    HWiNFO,
+    /// <summary>Windows ACPI 热区 (PerformanceCounter)</summary>
+    ThermalZone,
     /// <summary>无可用传感器后端</summary>
     None,
 }
@@ -47,12 +34,18 @@ public struct SystemSnapshot
     public double NetUp;
     public double BatteryPercent;
     public string BatteryStatus;
+    public int BatteryLifeSeconds;       // 秒，剩余可用时间，-1=未知（接电源时）
+    public bool BatterySaverOn;          // 省电模式开关
     public DiskInfo[] Disks;
+    public PhysicalDiskInfo[] PhysicalDisks;
     public double CpuTemperature;       // °C, -1 if unavailable
     public GpuInfo Gpu;                 // 主 GPU（向后兼容）
     public GpuInfo[] Gpus;              // 所有检测到的 GPU
     public SensorBackend Backend;       // 当前传感器数据源
     public string BackendNote;          // 后端状态描述（null=正常）
+    public bool HwinfoNearReset;        // HWiNFO 接近 12h 重置窗口
+    public TimeSpan HwinfoTimeRemaining; // HWiNFO 距重置剩余时间
+    public double CpuFrequency;         // 全核心平均频率 MHz, -1=不可用
 }
 
 public struct DiskInfo
@@ -64,6 +57,17 @@ public struct DiskInfo
     public double UsedPercent;
     public double ReadBytesPerSec;      // -1 if unavailable
     public double WriteBytesPerSec;     // -1 if unavailable
+}
+
+public struct PhysicalDiskInfo
+{
+    public string Model;                // e.g. "Samsung SSD 980 PRO 1TB"
+    public string SerialNumber;
+    public long TotalBytes;             // 物理磁盘总大小
+    public string InterfaceType;        // SATA/NVMe/USB
+    public DiskInfo[] Partitions;       // 该物理磁盘上的所有分区
+    public double ReadBytesPerSec;      // 汇总 IO 读
+    public double WriteBytesPerSec;     // 汇总 IO 写
 }
 
 public struct GpuInfo
@@ -78,7 +82,8 @@ public struct GpuInfo
 /// <summary>
 /// 系统信息采集器（单例）。每秒调用 Refresh() 获取最新指标。
 /// 所有页面和 Dock Band 共用同一实例。
-/// CPU/GPU 温度依赖 LibreHardwareMonitor（需管理员权限）。
+/// CPU/GPU 温度依赖 CpuSensorReader / GpuSensorReader（独立工作，无需外部配置）。
+/// 网络采集委托给 NetworkMonitor，磁盘采集委托给 DiskMonitor。
 /// </summary>
 public class SystemInfoService
 {
@@ -112,40 +117,105 @@ public class SystemInfoService
         public byte Reserved1;
         public int BatteryLifeTime;
         public int BatteryFullLifeTime;
+        public byte SystemStatusFlag;     // 0=省电关闭, 1=省电开启
     }
 
     [DllImport("kernel32.dll")]
     private static extern bool GetSystemPowerStatus(out SYSTEM_POWER_STATUS lpSystemPowerStatus);
 
+    // ---- Sub-monitors ----
+    private readonly NetworkMonitor _network = new();
+    private readonly DiskMonitor _disk = new();
+    private readonly CpuFrequencyReader _cpuFreq = new();
+
     // ---- CPU counter (cached, reused across Refresh calls) ----
     private PerformanceCounter? _cpuCounter;
+    private readonly object _cpuCounterLock = new();
 
-    // ---- Disk IO counters (lazy-created per drive) ----
-    private readonly Dictionary<string, (PerformanceCounter? Read, PerformanceCounter? Write)> _diskIOCounters = new();
-    private readonly object _diskIOLock = new();
+    // ---- Sparkline charts (pushed every Refresh, read by detail pages) ----
+    public SparklineChart CpuChart { get; } = new(maxPoints: 34, metric: ChartMetric.Cpu);
+    public SparklineChart MemChart { get; } = new(maxPoints: 34, metric: ChartMetric.Memory);
+    public SparklineChart GpuChart { get; } = new(maxPoints: 34, metric: ChartMetric.Gpu);
+    public SparklineChart GpuMemChart { get; } = new(maxPoints: 34, metric: ChartMetric.GpuMemory);
+    public SparklineChart NetDownChart { get; } = new(maxPoints: 34, metric: ChartMetric.Network);
+    public SparklineChart NetUpChart { get; } = new(maxPoints: 34, metric: ChartMetric.NetworkUp);
 
-    // ---- Network tracking ----
-    private long _prevNetDown;
-    private long _prevNetUp;
-    private DateTime _prevNetDownTime;
-    private DateTime _prevNetUpTime;
+    // ---- Cached hardware names (read once) ----
+    public static string CpuName { get; } = ReadCpuName();
 
-    public SystemSnapshot Current { get; private set; }
+    private static string ReadCpuName()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                @"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
+            return key?.GetValue("ProcessorNameString") as string ?? "";
+        }
+        catch { return ""; }
+    }
+
+    // ---- WiFi SSID (cached, refreshed every 15s) ----
+    private static string? _cachedSsid;
+    private static DateTime _ssidLastQuery = DateTime.MinValue;
+    private static readonly object _ssidLock = new();
+
+    public string GetWifiSsid()
+    {
+        lock (_ssidLock)
+        {
+            if (DateTime.UtcNow - _ssidLastQuery < TimeSpan.FromSeconds(15) && _cachedSsid != null)
+                return _cachedSsid;
+            _ssidLastQuery = DateTime.UtcNow;
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "netsh",
+                    Arguments = "wlan show interfaces",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true,
+                    StandardOutputEncoding = System.Text.Encoding.UTF8,
+                };
+                using var p = System.Diagnostics.Process.Start(psi);
+                if (p == null) { _cachedSsid = ""; return ""; }
+                var output = p.StandardOutput.ReadToEnd();
+                p.WaitForExit(3000);
+                // Parse "    SSID : MyNetwork"
+                foreach (var line in output.Split('\n'))
+                {
+                    var trimmed = line.Trim();
+                    if (trimmed.StartsWith("SSID", StringComparison.OrdinalIgnoreCase) && trimmed.Contains(":"))
+                    {
+                        var val = trimmed.Substring(trimmed.IndexOf(':') + 1).Trim();
+                        if (!string.IsNullOrEmpty(val) && !val.Equals("BSSID", StringComparison.OrdinalIgnoreCase))
+                        {
+                            _cachedSsid = val;
+                            return val;
+                        }
+                    }
+                }
+                _cachedSsid = "";
+            }
+            catch { _cachedSsid = ""; }
+            return _cachedSsid ?? "";
+        }
+    }
+
+    private SystemSnapshot _current;
+    private readonly object _currentLock = new();
+
+    public SystemSnapshot Current
+    {
+        get { lock (_currentLock) return _current; }
+        private set { lock (_currentLock) _current = value; }
+    }
 
     private SystemInfoService()
     {
         // 首次播种网络计数器（不计算速度，只记录基线）
-        try
-        {
-            _prevNetDown = ReadNetBytes(false);
-            _prevNetUp = ReadNetBytes(true);
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[SysMon] Network baseline init: {ex.Message}");
-        }
-        _prevNetDownTime = DateTime.UtcNow;
-        _prevNetUpTime = DateTime.UtcNow;
+        try { _network.Seed(); }
+        catch (Exception ex) { Debug.WriteLine($"[SysMon] Network baseline init: {ex.Message}"); }
 
         try { _cpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total"); }
         catch (Exception ex) { Debug.WriteLine($"[SysMon] CPU counter init failed: {ex.Message}"); _cpuCounter = null; }
@@ -157,43 +227,93 @@ public class SystemInfoService
 
     /// <summary>
     /// 刷新所有指标。建议每秒调用一次。
+    /// 线程安全：如果另一个线程正在刷新，本次调用直接跳过（返回旧快照）。
     /// </summary>
     public void Refresh()
     {
+        // P6: 防止多线程并发 Refresh（DockBand coordinator + 任何直接调用者）
+        if (System.Threading.Interlocked.Exchange(ref _isRefreshing, 1) != 0)
+            return;
+
+        try
+        {
         var now = DateTime.UtcNow;
+        var (netDown, netUp) = _network.ReadSpeed(now);
 
         var snapshot = new SystemSnapshot
         {
             CpuUsage = ReadCpuUsage(),
-            NetDown = ReadNetDown(now),
-            NetUp = ReadNetUp(now),
-            Disks = ReadDisks(),
+            NetDown = netDown,
+            NetUp = netUp,
+            Disks = _disk.Read(),
             CpuTemperature = -1,
             Gpu = new GpuInfo { UsagePercent = -1, Temperature = -1 },
             Gpus = [],
             Backend = SensorBackend.None,
         };
 
+        // 物理磁盘查询（WMI，稍重）— 复用已读的逻辑分区数据
+        try { snapshot.PhysicalDisks = _disk.ReadPhysicalDisks(snapshot.Disks); }
+        catch (Exception ex) { Debug.WriteLine($"[SysMon] ReadPhysicalDisks: {ex.Message}"); snapshot.PhysicalDisks = []; }
+
         ReadMemory(ref snapshot);
         ReadBattery(ref snapshot);
 
-        // 传感器回退链: LHM (PawnIO) → AMD ADL → HWiNFO → None
+        // 传感器采集: Broker 共享内存推送 → ThermalZone → None
         TryReadSensors(ref snapshot);
 
+        // CPU 频率 (任务管理器算法: 基础频率 × 性能百分比 / 100)
+        try { snapshot.CpuFrequency = _cpuFreq.ReadFrequency(); }
+        catch (Exception ex) { Debug.WriteLine($"[SysMon] CpuFreq: {ex.Message}"); }
+
+        // Push to sparkline charts for real-time trend visualization
+        CpuChart.Push((float)snapshot.CpuUsage);
+        MemChart.Push((float)snapshot.MemoryUsed);
+        if (snapshot.Gpu.UsagePercent >= 0)
+            GpuChart.Push((float)snapshot.Gpu.UsagePercent);
+        if (snapshot.Gpu.MemoryTotalMB > 0)
+            GpuMemChart.Push((float)(snapshot.Gpu.MemoryUsedMB * 100.0 / snapshot.Gpu.MemoryTotalMB));
+        NetDownChart.PushRaw((float)(snapshot.NetDown / 1_000_000.0));
+        NetUpChart.PushRaw((float)(snapshot.NetUp / 1_000_000.0));
+
         Current = snapshot;
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref _isRefreshing, 0);
+        }
     }
+
+    private int _isRefreshing;
 
     // ===== CPU =====
     private double ReadCpuUsage()
     {
         try
         {
-            if (_cpuCounter is null) return 0;
-            return Math.Round(_cpuCounter.NextValue(), 1);
+            // H3: 懒重建 — 如果计数器为 null（之前异常销毁），尝试重新创建
+            PerformanceCounter? counter;
+            lock (_cpuCounterLock)
+            {
+                if (_cpuCounter is null)
+                {
+                    try { _cpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total"); }
+                    catch (Exception ex) { Debug.WriteLine($"[SysMon] CPU counter re-init failed: {ex.Message}"); return 0; }
+                }
+                counter = _cpuCounter;
+            }
+
+            return Math.Round(counter.NextValue(), 1);
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[SysMon] ReadCpuUsage: {ex.Message}");
+            // H3: 销毁损坏的计数器，下次调用时会重建
+            lock (_cpuCounterLock)
+            {
+                _cpuCounter?.Dispose();
+                _cpuCounter = null;
+            }
             return 0;
         }
     }
@@ -214,127 +334,10 @@ public class SystemInfoService
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[SysMon] ReadMemory (GlobalMemoryStatusEx): {ex.Message}, falling back to GC");
-            // fallback via GC
-            snapshot.MemoryTotalBytes = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+            // GlobalMemoryStatusEx failure is extremely rare; if it happens, leave fields at 0
+            // rather than reporting misleading GC heap limit as "total memory".
+            Debug.WriteLine($"[SysMon] ReadMemory (GlobalMemoryStatusEx): {ex.Message} — memory unavailable");
         }
-    }
-
-    // ===== Disks =====
-    private DiskInfo[] ReadDisks()
-    {
-        try
-        {
-            return DriveInfo.GetDrives()
-                .Where(d => d.IsReady && d.DriveType is DriveType.Fixed or DriveType.Removable)
-                .Select(d =>
-                {
-                    string label = "";
-                    try { label = d.VolumeLabel; }
-                    catch (Exception ex) { Debug.WriteLine($"[SysMon] VolumeLabel ({d.Name}): {ex.Message}"); }
-
-                    var di = new DiskInfo
-                    {
-                        Name = d.Name,
-                        VolumeLabel = label,
-                        TotalBytes = d.TotalSize,
-                        FreeBytes = d.AvailableFreeSpace,
-                        UsedPercent = Math.Round((double)(d.TotalSize - d.AvailableFreeSpace) / d.TotalSize * 100, 1),
-                        ReadBytesPerSec = -1,
-                        WriteBytesPerSec = -1,
-                    };
-
-                    // Attach IO speed via PerformanceCounter (lazy-create, reused)
-                    ReadDiskIO(d.Name.TrimEnd('\\'), ref di);
-
-                    return di;
-                })
-                .ToArray();
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[SysMon] ReadDisks: {ex.Message}");
-            return [];
-        }
-    }
-
-    private void ReadDiskIO(string driveLetter, ref DiskInfo di)
-    {
-        (PerformanceCounter? Read, PerformanceCounter? Write) counters;
-        lock (_diskIOLock)
-        {
-            if (!_diskIOCounters.TryGetValue(driveLetter, out counters))
-            {
-                counters = (CreateIOCounter(driveLetter, "Read"), CreateIOCounter(driveLetter, "Write"));
-                _diskIOCounters[driveLetter] = counters;
-            }
-        }
-
-        try { di.ReadBytesPerSec = counters.Read?.NextValue() ?? -1; }
-        catch (Exception ex) { Debug.WriteLine($"[SysMon] Disk read IO ({driveLetter}): {ex.Message}"); }
-        try { di.WriteBytesPerSec = counters.Write?.NextValue() ?? -1; }
-        catch (Exception ex) { Debug.WriteLine($"[SysMon] Disk write IO ({driveLetter}): {ex.Message}"); }
-    }
-
-    private static PerformanceCounter? CreateIOCounter(string drive, string rw)
-    {
-        try
-        {
-            return new PerformanceCounter("LogicalDisk", $"Disk {rw} Bytes/sec", drive);
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[SysMon] CreateIOCounter ({drive}/{rw}): {ex.Message}");
-            return null;
-        }
-    }
-
-    // ===== Network =====
-    /// <summary>读取所有活跃网络接口的字节计数。upload=true 返回已发送，false 返回已接收。</summary>
-    private static long ReadNetBytes(bool upload)
-    {
-        long total = 0;
-        foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
-        {
-            if (ni.OperationalStatus == OperationalStatus.Up)
-            {
-                var stats = ni.GetIPStatistics();
-                total += upload ? stats.BytesSent : stats.BytesReceived;
-            }
-        }
-        return total;
-    }
-
-    private double ReadNetDown(DateTime now)
-    {
-        try
-        {
-            long current = ReadNetBytes(false);
-            double speed = CalcSpeed(ref _prevNetDown, current, ref _prevNetDownTime, now);
-            return speed;
-        }
-        catch (Exception ex) { Debug.WriteLine($"[SysMon] ReadNetDown: {ex.Message}"); return 0; }
-    }
-
-    private double ReadNetUp(DateTime now)
-    {
-        try
-        {
-            long current = ReadNetBytes(true);
-            double speed = CalcSpeed(ref _prevNetUp, current, ref _prevNetUpTime, now);
-            return speed;
-        }
-        catch (Exception ex) { Debug.WriteLine($"[SysMon] ReadNetUp: {ex.Message}"); return 0; }
-    }
-
-    private static double CalcSpeed(ref long prevBytes, long currentBytes, ref DateTime prevTime, DateTime now)
-    {
-        double elapsed = (now - prevTime).TotalSeconds;
-        if (elapsed <= 0) return 0;
-        double speed = (currentBytes - prevBytes) / elapsed;
-        prevBytes = currentBytes;
-        prevTime = now;
-        return speed < 0 ? 0 : speed; // handle counter reset
     }
 
     // ===== Battery =====
@@ -344,17 +347,37 @@ public class SystemInfoService
         {
             if (GetSystemPowerStatus(out var pwr))
             {
+                snapshot.BatterySaverOn = pwr.SystemStatusFlag == 1;
+                snapshot.BatteryLifeSeconds = pwr.BatteryLifeTime;
+
                 int flag = pwr.BatteryFlag;
                 if (flag <= 9 && flag != 128) // has battery
                 {
                     snapshot.BatteryPercent = pwr.BatteryLifePercent > 100 ? -1 : pwr.BatteryLifePercent;
-                    snapshot.BatteryStatus = flag switch
-                    {
-                        9 => "charging",
-                        _ when pwr.ACLineStatus == 1 => "full",
-                        < 9 => "discharging",
-                        _ => "unknown",
-                    };
+
+                    bool chargingBit = (flag & 8) != 0;
+                    bool acOnline = pwr.ACLineStatus == 1;
+
+                    // WMI BatteryStatus.RemainingCapacity 趋势检测（mWh 精度，3 秒窗口）
+                    // 这是唯一能可靠识别"双重供电"的信号——充电上限场景下
+                    // GetSystemPowerStatus 和 WMI 都报 charging，但容量在掉
+                    var wmi = BatteryQueryService.Instance.GetStatus();
+                    bool draining = wmi is { IsValid: true, IsDraining: true };
+
+                    // 充电位置位 + 电池容量在掉 → 双重供电
+                    // 充电位置位 + 不掉 → 充电中
+                    // 无充电位 + AC + 不掉 → 满电
+                    // 无充电位 + 掉 或 无AC → 放电中
+                    if (chargingBit && draining)
+                        snapshot.BatteryStatus = "dual";
+                    else if (chargingBit)
+                        snapshot.BatteryStatus = "charging";
+                    else if (acOnline && !draining)
+                        snapshot.BatteryStatus = "full";
+                    else if (draining || !acOnline)
+                        snapshot.BatteryStatus = "discharging";
+                    else
+                        snapshot.BatteryStatus = "unknown";
                 }
                 else
                 {
@@ -373,8 +396,7 @@ public class SystemInfoService
 
     // ============================================================
     // 传感器采集 — 委托给 CpuSensorReader / GpuSensorReader
-    // CPU: PawnIO MSR(Intel) / PawnIO SMU(AMD) → ADL(AMD) → LHM → HWiNFO
-    // GPU: NVAPI(NVIDIA) / ADL(AMD) / IGCL(Intel) → LHM → HWiNFO
+    // CpuSensorReader.Read() 和 GpuSensorReader.ReadAll() 独立工作
     // ============================================================
 
     private static void TryReadSensors(ref SystemSnapshot snapshot)
@@ -387,16 +409,16 @@ public class SystemInfoService
             snapshot.CpuTemperature = cpuResult.Temperature;
             snapshot.Backend = cpuResult.Source switch
             {
-                "PawnIO_MSR" => SensorBackend.PawnMsr,
-                "PawnIO_SMU" => SensorBackend.PawnSmu,
-                "Broker_SMU" or "Broker_MSR" => SensorBackend.Lhm,
-                "LHM_HTTP" => SensorBackend.Lhm,
-                "ThermalZone" => SensorBackend.Lhm,
-                string s when s.StartsWith("ADL") => SensorBackend.AmdAdl,
-                "LHM" => SensorBackend.Lhm,
-                string s when s.StartsWith("HWiNFO") => SensorBackend.HwInfo,
+                string s when s.StartsWith("Broker") => SensorBackend.Broker,
+                string s when s.Contains("HWiNFO") => SensorBackend.HWiNFO,
+                "ThermalZone" => SensorBackend.ThermalZone,
                 _ => SensorBackend.None,
             };
+
+            // HWiNFO 12h 重置检测
+            var hwinfo = HwinfoSharedMemoryReader.Instance;
+            snapshot.HwinfoNearReset = hwinfo.IsNearResetWindow;
+            snapshot.HwinfoTimeRemaining = hwinfo.TimeUntilReset;
 
             // 构建多 GPU 数组
             if (gpuResults.Count > 0)
@@ -409,9 +431,10 @@ public class SystemInfoService
                     MemoryUsedMB = r.MemoryUsedMB,
                     MemoryTotalMB = r.MemoryTotalMB,
                 }).ToArray();
-                // 主 GPU：优先有 3D 负载的，否则温度最高的
+                // 主 GPU：优先独显（有独立显存），其次有负载的，最后温度最高的
                 var primary = gpuResults
-                    .OrderByDescending(g => g.UsagePercent > 0 ? 1 : 0)
+                    .OrderByDescending(g => g.MemoryTotalMB > 0 ? 1 : 0)  // 有独立显存 = 独显优先
+                    .ThenByDescending(g => g.UsagePercent > 0 ? 1 : 0)
                     .ThenByDescending(g => g.Temperature)
                     .First();
                 snapshot.Gpu = new GpuInfo
@@ -432,16 +455,25 @@ public class SystemInfoService
             // 后端描述
             string gpuSource = gpuResults.Count > 0 ? gpuResults[0].Source : "无";
             snapshot.BackendNote = cpuResult.Source == gpuSource
-                ? (cpuResult.Source == "无" ? "CPU 和 GPU 均无可用数据源" : $"数据源: {cpuResult.Source}")
+                ? (cpuResult.Source == "无" ? Loc.Get("Backend.BothUnavailable") : Loc.Format("Backend.DataSource", cpuResult.Source))
                 : $"CPU: {cpuResult.Source}, GPU: {gpuSource}" +
-                  (snapshot.Gpus.Length > 1 ? $" ({snapshot.Gpus.Length} 张卡)" : "");
+                  (snapshot.Gpus.Length > 1 ? Loc.Format("Backend.GpuCount", snapshot.Gpus.Length) : "");
+
+            // HWiNFO 12h 警告追加到后端描述
+            if (snapshot.HwinfoNearReset && snapshot.Backend == SensorBackend.HWiNFO)
+            {
+                var remaining = snapshot.HwinfoTimeRemaining;
+                snapshot.BackendNote += remaining.TotalMinutes > 0
+                    ? Loc.Format("Backend.HwinfoWarningSoon", (int)remaining.TotalMinutes)
+                    : Loc.Get("Backend.HwinfoExpired");
+            }
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[SysMon] TryReadSensors 异常: {ex.GetType().Name}: {ex.Message}");
             snapshot.CpuTemperature = -1;
             snapshot.Backend = SensorBackend.None;
-            snapshot.BackendNote = $"传感器采集异常: {ex.Message}";
+            snapshot.BackendNote = Loc.Format("Backend.Exception", ex.Message);
             snapshot.Gpu = new GpuInfo { UsagePercent = -1, Temperature = -1 };
             snapshot.Gpus = [];
         }

@@ -106,20 +106,21 @@ internal static class DockBandRefreshCoordinator
 
 internal static class DockFormat
 {
-    public static string Speed(double bps) => bps switch
+    /// <summary>格式化速度（字节/秒）。>=1MB/s 显示 MB/s，>=1KB/s 显示 KB/s。</summary>
+    public static string Speed(double bytesPerSec) => bytesPerSec switch
     {
-        >= 1_000_000 => $"{bps / 1_000_000:F1} MB/s",
-        >= 1_000 => $"{bps / 1_000:F0} KB/s",
-        >= 1 => $"{bps:F0} B/s",
+        >= 1_000_000 => $"{bytesPerSec / 1_000_000:F1} MB/s",
+        >= 1_000 => $"{bytesPerSec / 1_000:F0} KB/s",
+        >= 1 => $"{bytesPerSec:F0} B/s",
         _ => "0 B/s",
     };
 
-    /// <summary>紧凑速度（Dock 栏用），单位缩写成单个字母以节省宽度。</summary>
-    public static string CompactSpeed(double bps) => bps switch
+    /// <summary>紧凑速度（Dock 栏用），单位缩写成单个字母以节省宽度。输入：字节/秒。</summary>
+    public static string CompactSpeed(double bytesPerSec) => bytesPerSec switch
     {
-        >= 1_000_000 => $"{bps / 1_000_000:F1}M/s",
-        >= 1_000 => $"{bps / 1_000:F0}K/s",
-        >= 1 => $"{bps:F0}B/s",
+        >= 1_000_000 => $"{bytesPerSec / 1_000_000:F1}M/s",
+        >= 1_000 => $"{bytesPerSec / 1_000:F0}K/s",
+        >= 1 => $"{bytesPerSec:F0}B/s",
         _ => "0",
     };
 
@@ -129,13 +130,14 @@ internal static class DockFormat
     /// <summary>百分比。>=0 显示数值，负值表示不可用。</summary>
     public static string Percent(double p) => p >= 0 ? $"{p:F0}%" : "N/A";
 
-    /// <summary>电池状态文本（中文）。</summary>
+    /// <summary>电池状态文本。</summary>
     public static string BatteryStatusText(string status) => status switch
     {
-        "charging" => "充电中",
-        "discharging" => "放电中",
-        "full" => "已充满",
-        "no battery" => "无电池",
+        "charging" => Loc.Get("BatteryStatus.Charging"),
+        "discharging" => Loc.Get("BatteryStatus.Discharging"),
+        "dual" => Loc.Get("BatteryStatus.Dual"),
+        "full" => Loc.Get("BatteryStatus.Full"),
+        "no battery" => Loc.Get("BatteryStatus.NoBattery"),
         _ => status,
     };
 
@@ -160,8 +162,8 @@ internal sealed partial class CpuDockBand : WrappedDockItem
     {
         _cpuItem = new ListItem(new CpuDetailPage())
         {
-            Title = "CPU",
-            Subtitle = "加载中…",
+            Title = Loc.Get("Dock.Cpu"),
+            Subtitle = Loc.Get("Common.Loading"),
             Icon = new IconInfo(""), // CPU — SensorShelf
         };
         Items = [_cpuItem];
@@ -173,14 +175,14 @@ internal sealed partial class CpuDockBand : WrappedDockItem
         var info = SystemInfoService.Instance.Current;
         var temp = DockFormat.Temp(info.CpuTemperature);
         _cpuItem.Title = temp.Length > 0
-            ? $"CPU {info.CpuUsage:F0}%  {temp}"
-            : $"CPU {info.CpuUsage:F0}%";
+            ? Loc.Format("Dock.CpuTitle", $"{info.CpuUsage:F0}", temp)
+            : Loc.Format("Dock.CpuTitleNoTemp", $"{info.CpuUsage:F0}");
         _cpuItem.Subtitle = info.CpuUsage switch
         {
-            >= 90 => "⚠ 高负载",
-            >= 70 => "负载偏高",
-            >= 40 => "中等",
-            _ => "空闲",
+            >= 90 => Loc.Get("Dock.CpuHighLoad"),
+            >= 70 => Loc.Get("Dock.CpuElevated"),
+            >= 40 => Loc.Get("Dock.CpuMedium"),
+            _ => Loc.Get("Dock.CpuIdle"),
         };
     }
 }
@@ -195,8 +197,8 @@ internal sealed partial class MemoryDockBand : WrappedDockItem
     {
         _memItem = new ListItem(new MemoryDetailPage())
         {
-            Title = "内存",
-            Subtitle = "加载中…",
+            Title = Loc.Get("Dock.Memory"),
+            Subtitle = Loc.Get("Common.Loading"),
             Icon = new IconInfo(""), // RAM — SensorShelf
         };
         Items = [_memItem];
@@ -208,8 +210,8 @@ internal sealed partial class MemoryDockBand : WrappedDockItem
         var info = SystemInfoService.Instance.Current;
         var used = info.MemoryUsedBytes / (1024.0 * 1024 * 1024);
         var total = info.MemoryTotalBytes / (1024.0 * 1024 * 1024);
-        _memItem.Title = $"内存 {info.MemoryUsed:F0}%";
-        _memItem.Subtitle = $"已用 {used:F1} / {total:F1} GB";
+        _memItem.Title = Loc.Format("Dock.MemoryTitle", $"{info.MemoryUsed:F0}");
+        _memItem.Subtitle = Loc.Format("Dock.MemorySubtitle", $"{used:F1}", $"{total:F1}");
     }
 }
 
@@ -223,8 +225,8 @@ internal sealed partial class DiskDockBand : WrappedDockItem
     {
         _diskItem = new ListItem(new DiskDetailPage())
         {
-            Title = "磁盘",
-            Subtitle = "加载中…",
+            Title = Loc.Get("Dock.Disk"),
+            Subtitle = Loc.Get("Common.Loading"),
             Icon = new IconInfo(""), // Storage — SensorShelf
         };
         Items = [_diskItem];
@@ -236,7 +238,7 @@ internal sealed partial class DiskDockBand : WrappedDockItem
         var info = SystemInfoService.Instance.Current;
         if (info.Disks.Length == 0)
         {
-            _diskItem.Title = "磁盘 — 无驱动器";
+            _diskItem.Title = Loc.Get("Dock.DiskNoDrive");
             _diskItem.Subtitle = "";
             return;
         }
@@ -264,8 +266,8 @@ internal sealed partial class NetworkDownDockBand : WrappedDockItem
     {
         _netItem = new ListItem(new NetworkDetailPage())
         {
-            Title = "下载",
-            Subtitle = "加载中…",
+            Title = Loc.Get("Dock.Download"),
+            Subtitle = Loc.Get("Common.Loading"),
             Icon = new IconInfo(""), // Segoe Fluent: Download
         };
         Items = [_netItem];
@@ -276,7 +278,7 @@ internal sealed partial class NetworkDownDockBand : WrappedDockItem
     {
         var info = SystemInfoService.Instance.Current;
         _netItem.Title = $"↓ {DockFormat.Speed(info.NetDown)}";
-        _netItem.Subtitle = "下载";
+        _netItem.Subtitle = Loc.Get("Dock.Download");
     }
 }
 
@@ -290,8 +292,8 @@ internal sealed partial class NetworkUpDockBand : WrappedDockItem
     {
         _netItem = new ListItem(new NetworkDetailPage())
         {
-            Title = "上传",
-            Subtitle = "加载中…",
+            Title = Loc.Get("Dock.Upload"),
+            Subtitle = Loc.Get("Common.Loading"),
             Icon = new IconInfo(""), // Segoe Fluent: Upload
         };
         Items = [_netItem];
@@ -302,7 +304,7 @@ internal sealed partial class NetworkUpDockBand : WrappedDockItem
     {
         var info = SystemInfoService.Instance.Current;
         _netItem.Title = $"↑ {DockFormat.Speed(info.NetUp)}";
-        _netItem.Subtitle = "上传";
+        _netItem.Subtitle = Loc.Get("Dock.Upload");
     }
 }
 
@@ -316,8 +318,8 @@ internal sealed partial class BatteryDockBand : WrappedDockItem
     {
         _batItem = new ListItem(new BatteryDetailPage())
         {
-            Title = "电池",
-            Subtitle = "加载中…",
+            Title = Loc.Get("Dock.Battery"),
+            Subtitle = Loc.Get("Common.Loading"),
             Icon = new IconInfo(""), // Battery — SensorShelf
         };
         Items = [_batItem];
@@ -329,72 +331,12 @@ internal sealed partial class BatteryDockBand : WrappedDockItem
         var info = SystemInfoService.Instance.Current;
         if (info.BatteryPercent < 0)
         {
-            _batItem.Title = "电池 — 无电池";
-            _batItem.Subtitle = "台式机 / 交流电";
+            _batItem.Title = Loc.Get("Dock.BatteryNoBattery");
+            _batItem.Subtitle = Loc.Get("Dock.BatteryDesktop");
             return;
         }
-        _batItem.Title = $"电池 {info.BatteryPercent:F0}%";
+        _batItem.Title = Loc.Format("Dock.BatteryTitle", $"{info.BatteryPercent:F0}");
         _batItem.Subtitle = DockFormat.BatteryStatusText(info.BatteryStatus);
-    }
-}
-
-/// <summary>Dock band: 单个传感器（动态、用户可选）。显示传感器名称 + 数值。</summary>
-internal sealed partial class SensorDockBand : WrappedDockItem
-{
-    private readonly ListItem _item;
-    private readonly string _sensorKey;
-
-    public SensorDockBand(string sensorKey, string displayName)
-        : base(Array.Empty<IListItem>(), $"sysmon.dock.sensor.{SanitizeId(sensorKey)}", displayName)
-    {
-        _sensorKey = sensorKey;
-        _item = new ListItem(new NoOpCommand())
-        {
-            Title = displayName,
-            Subtitle = "加载中…",
-            Icon = new IconInfo(""),
-        };
-        Items = [_item];
-        DockBandRefreshCoordinator.Subscribe(OnRefresh);
-    }
-
-    internal void OnRefresh()
-    {
-        var reading = LhmSensorService.Instance.AllReadings
-            .FirstOrDefault(r => r.UniqueKey == _sensorKey);
-
-        if (reading.SensorName == null)
-        {
-            _item.Title = "传感器不可用";
-            _item.Subtitle = _sensorKey;
-            return;
-        }
-
-        // 根据类别选图标（复用缓存实例，避免每秒分配）
-        _item.Icon = SensorCategoryMeta.GetIcon(reading.Category);
-
-        // 值 + 单位
-        _item.Title = $"{reading.DisplayName}  {reading.FormatValue()}";
-
-        // 阈值着色标记
-        string status = "";
-        if (reading.CriticalThreshold > 0 && reading.Value >= reading.CriticalThreshold)
-            status = "🔴 ";
-        else if (reading.WarningThreshold > 0 && reading.Value >= reading.WarningThreshold)
-            status = "🟡 ";
-
-        _item.Subtitle = $"{status}{reading.HardwareName}";
-    }
-
-    public string SensorKey => _sensorKey;
-
-    /// <summary>将传感器键转为安全的 Dock ID 后缀（避免 GetHashCode 碰撞和跨运行不稳定）</summary>
-    private static string SanitizeId(string key)
-    {
-        var sb = new System.Text.StringBuilder(key.Length);
-        foreach (var c in key)
-            sb.Append(char.IsLetterOrDigit(c) || c == '.' ? c : '_');
-        return sb.ToString();
     }
 }
 
@@ -408,8 +350,8 @@ internal sealed partial class GpuDockBand : WrappedDockItem
     {
         _gpuItem = new ListItem(new GpuDetailPage())
         {
-            Title = "GPU",
-            Subtitle = "加载中…",
+            Title = Loc.Get("Dock.Gpu"),
+            Subtitle = Loc.Get("Common.Loading"),
             Icon = new IconInfo(""), // GPU — SensorShelf
         };
         Items = [_gpuItem];
@@ -422,19 +364,20 @@ internal sealed partial class GpuDockBand : WrappedDockItem
         var gpus = info.Gpus;
         if (gpus == null || gpus.Length == 0)
         {
-            _gpuItem.Title = "GPU — 不可用";
-            _gpuItem.Subtitle = "LHM 未加载";
+            _gpuItem.Title = Loc.Get("Dock.GpuUnavailable");
+            _gpuItem.Subtitle = Loc.Get("Dock.GpuSubtitle");
             return;
         }
 
-        // 选择主 GPU（优先有 3D 负载的）
-        var primary = gpus.OrderByDescending(g => g.UsagePercent > 0 ? 1 : 0)
+        // 选择主 GPU（优先独显=有独立显存，其次有负载的）
+        var primary = gpus.OrderByDescending(g => g.MemoryTotalMB > 0 ? 1 : 0)
+                          .ThenByDescending(g => g.UsagePercent > 0 ? 1 : 0)
                           .ThenByDescending(g => g.Temperature)
                           .First();
         var temp = DockFormat.Temp(primary.Temperature);
         _gpuItem.Title = temp.Length > 0
-            ? $"GPU {primary.UsagePercent:F0}%  {temp}"
-            : $"GPU {DockFormat.Percent(primary.UsagePercent)}";
+            ? Loc.Format("Dock.GpuTitle", $"{primary.UsagePercent:F0}", temp)
+            : Loc.Format("Dock.GpuTitleNoTemp", DockFormat.Percent(primary.UsagePercent));
         _gpuItem.Subtitle = gpus.Length > 1
             ? $"{primary.Name} (+{gpus.Length - 1})"
             : primary.Name;

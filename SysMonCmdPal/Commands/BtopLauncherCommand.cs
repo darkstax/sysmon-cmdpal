@@ -36,14 +36,14 @@ internal sealed partial class BtopLauncherCommand : InvokableCommand
     public BtopLauncherCommand()
     {
         Id = "btop4win";
-        Name = "启动 btop4win";
+        Name = Loc.Get("Btop.Name");
     }
 
     public override CommandResult Invoke()
     {
         string? btopExe = FindBtopExe();
         if (btopExe == null)
-            return CommandResult.ShowToast("btop4win 未找到。请通过 scoop install btop-lhm 安装，或确保 btop.exe 在 PATH 中。");
+            return CommandResult.ShowToast(Loc.Get("Btop.NotFound"));
 
         // 尝试通过 Windows Terminal 启动（TUI 程序需要终端）
         string? wt = FindWindowsTerminal();
@@ -69,7 +69,7 @@ internal sealed partial class BtopLauncherCommand : InvokableCommand
         }
         catch (Exception ex)
         {
-            return CommandResult.ShowToast($"启动 btop4win 失败: {ex.Message}");
+            return CommandResult.ShowToast(Loc.Format("Btop.LaunchFailed", ex.Message));
         }
     }
 

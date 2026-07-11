@@ -21,54 +21,83 @@ PowerToys Command Palette 系统监控扩展。把 btop4win 的核心指标带�
 ```
 Command Palette ← WinRT/COM → SysMonCmdPal.exe (.NET 10)
                                    ├── SysMonCommandsProvider  (顶级命令 + Dock Band 注册)
-                                   ├── SysMonDockBands         (DockFormat + 8 种 DockBand)
+                                   ├── SysMonDockBands         (DockFormat + 7 种 DockBand)
                                    ├── SystemInfoService       (单例: P/Invoke + 传感器回退)
-                                   ├── LhmSensorService        (全量 LHM 传感器分类)
-                                   ├── AmdTempReader           (ADL + HWiNFO 回退)
-                                   ├── Models/
-                                   │   ├── SensorReading       (17 类传感器模型)
-                                   │   └── SensorCategoryMeta  (类别排序 + 中文名 + 图标缓存)
-                                   ├── Pages/
-                                   │   ├── SysMonMainPage      (列表主页 + 后端状态)
-                                   │   ├── SensorListPage      (全量传感器浏览)
-                                   │   ├── CpuDetailPage       (CPU Markdown)
-                                   │   ├── MemoryDetailPage    (内存 Markdown)
-                                   │   ├── DiskDetailPage      (磁盘列表 + IO 速度)
-                                   │   ├── NetworkDetailPage   (网络 Markdown + 接口)
-                                   │   ├── BatteryDetailPage   (电池 Markdown)
-                                   │   └── GpuDetailPage       (GPU + 温度 Markdown)
-                                   └── Commands/
-                                       ├── BtopLauncherCommand (btop4win 启动器)
-                                       └── ToggleSensorCommand  (传感器 Dock 开关)
+                                   ├── Broker/                 (共享内存读取 + 快照管理)
+                                   │   ├── SharedMemoryReader  (后台线程读 Broker SHM)
+                                   │   ├── BrokerPushReceiver  (不可变快照存储)
+                                   │   ├── BrokerDetector      (Broker 进程检测)
+                                   │   └── ShmLayout           (SHM v2 布局常量)
+                                   ├── Services/
+                                   │   ├── CpuSensorReader     (CPU 温度三层回退)
+                                   │   ├── GpuSensorReader     (GPU 数据三层回退)
+                                   │   ├── HwinfoSharedMemoryReader (HWiNFO SHM 读取)
+                                   │   ├── ThermalZoneReader   (ACPI 热区回退)
+                                   │   ├── SensorLogger        (传感器日志)
+                                   │   └── SparklineChart      (PNG 火花线渲染)
+                                   ├── Pages/                   (8 个详情页)
+                                   ├── Commands/                (Dock Band + btop 启动器)
+                                   └── Models/                  (SensorChainConfig)
+```
+
+**可选 Broker**（管理员权限，独立分发）:
+
+```
+SysMonBroker.exe (.NET 10 WinExe, 管理员)
+    ├── SensorCollector     (LHM 全量传感器采集)
+    ├── BrokerSharedMemory  (16KB SHM v2 写入 + EventWaitHandle 通知)
+    └── BrokerLogger        (缓冲 + 轮转日志)
+         ↓
+    SharedMemory v2 (16KB) → Plugin 传感器数据
 ```
 
 ## 传感器回退链
 
 ```
-LHM (PawnIO 驱动) ──✓──> 全功能 (CPU + GPU + 所有传感器)
-        │ ✗
-        ├── AMD ADL (atiadlxx.dll) ──✓──> 仅 CPU 温度 (用户态)
-        │         │ ✗
-        │         └── HWiNFO 共享内存 ──✓──> CPU + GPU 温度
-        │                       │ ✗
-        │                       └── 不可用 → UI 显示后端状态
+GPU 数据 (名称/利用率/温度/显存):
+  Broker SHM v2 (LHM, 管理员) ──✓──> 全功能
+      │ ✗ 或数据过期 (>10s)
+      ├── HWiNFO SHM ──✓──> 名称+利用率+温度+显存 (用户态, 每 ~12h 需重启)
+      │           │ ✗
+      │           └── 不可用 → 下层
+      ├── D3DKMT API ──✓──> 名称+利用率 (用户态, gdi32.dll, 无需管理员/第三方工具)
+      │           │ ✗
+      │           └── 不可用 → 下层
+      └── PDH PerformanceCounter ──✓──> 名称+利用率 (用户态, GPU Engine 计数器, 无需管理员)
+                  │ ✗
+                  └── 不可用 → 无 GPU 数据
+
+CPU 温度:
+  Broker SHM v2 (LHM, 管理员) ──✓──> 最高精度
+      │ ✗ 或数据过期 (>10s)
+      ├── HWiNFO SHM ──✓──> CPU 温度 (用户态, 每 ~12h 需重启)
+      │           │ ✗
+      │           └── 不可用 → 下层
+      └── ThermalZone (ACPI) ──✓──> 精度差 5-15°C, 聊胜于无
 ```
 
-LHM 崩溃时自动降级，UI 实时显示当前数据源。
+Broker 不可用时 GPU 依次降级到 HWiNFO → D3DKMT → PDH，CPU 温度降级到 HWiNFO → ThermalZone。
+D3DKMT 和 PDH 完全不需要管理员权限或第三方工具。UI 实时显示当前数据源。
 
 ## 数据采集
 
 | 指标 | 采集方式 |
 |------|----------|
-| CPU 使用率 | `PerformanceCounter("Processor", "% Processor Time", "_Total")` |
+| CPU 使用率 | `PerformanceCounter("Processor", "% Processor Time", "_Total")` (异常自动重建) |
+| CPU 频率 | `基础频率 × % Processor Performance / 100` (任务管理器算法, `_Total` 实例) |
 | 内存 | `GlobalMemoryStatusEx` P/Invoke |
-| 磁盘 IO | `PerformanceCounter("LogicalDisk")` Read/Write Bytes/sec |
+| 磁盘 IO | `PerformanceCounter("LogicalDisk")` Read/Write Bytes/sec (异常自动重建) |
 | 磁盘空间 | `System.IO.DriveInfo` (含卷标) |
-| 网速 | `NetworkInterface.GetAllNetworkInterfaces()` delta |
-| 电池 | `GetSystemPowerStatus` P/Invoke |
-| CPU/GPU 温度 | **Tier 1**: LHM (PawnIO) → **Tier 2**: AMD ADL → **Tier 3**: HWiNFO |
-| 传感器全量 | LibreHardwareMonitorLib sensor tree (17 类别) |
-| GPU 详情 | LHM: 名称、使用率、温度、显存 |
+| 物理磁盘 | WMI `Win32_DiskDrive` (缓存 30s, 总线类型推断 NVMe/USB/Thunderbolt) |
+| 网速 | `NetworkInterface.GetAllNetworkInterfaces()` delta (仅物理接口, EMA 平滑, 接口列表缓存 10s) |
+| 电池 | `GetSystemPowerStatus` P/Invoke + WMI `BatteryStatus` 趋势检测 (缓存 3s) |
+| 电池健康 | WinRT `Battery.GetReport()` (30天缓存) |
+| CPU 温度 | **Tier 1**: Broker SHM → **Tier 2**: HWiNFO SHM → **Tier 3**: ThermalZone |
+| GPU 利用率 | **Tier 1**: Broker SHM → **Tier 2**: HWiNFO SHM → **Tier 3**: D3DKMT API → **Tier 4**: PDH PerformanceCounter |
+| GPU 温度 | **Tier 1**: Broker SHM → **Tier 2**: HWiNFO SHM |
+| 传感器全量 | Broker v2 SHM: LHM 全量 (CPU/GPU/MB/Storage 的 temp/load/clock/power/fan/voltage) |
+| GPU 详情 | Broker SHM: 名称、使用率、温度、显存 |
+| GPU 名称 | Broker SHM / DXGI `IDXGIAdapter1` COM interop (LUID→名称映射, 缓存 30s) |
 
 ## 构建
 
@@ -95,37 +124,69 @@ $msbuild = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\18\BuildTools\MSBui
 # 安装: 双击 .msix 证书 + .msixbundle
 ```
 
+### SysMonBroker 独立构建（可选，独立分发）
+
+```powershell
+dotnet publish SysMonBroker\SysMonBroker.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true
+```
+
 ## 项目结构
 
 ```
-SysMonCmdPal/
-├── SysMonCmdPal.csproj           # .NET 10 + MSIX + LHM + AOT/Trim
-├── Package.appxmanifest          # MSIX 包清单 + COM 注册 + 扩展声明
-├── app.manifest                  # DPI 感知 + Windows 10 兼容性
-├── Program.cs                    # COM Server 入口 (-RegisterProcessAsComServer)
-├── SysMonExtension.cs            # IExtension 实现 (COM CLSID)
-├── SysMonCommandsProvider.cs     # 顶级命令 + Dock Band 注册
-├── Commands/
-│   ├── SysMonDockBands.cs        # DockFormat + CPU/内存/磁盘/网络/电池/GPU/Sensor DockBand
-│   ├── BtopLauncherCommand.cs    # btop4win 一键启动
-│   └── ToggleSensorCommand.cs    # 传感器 Dock 添加/移除
-├── Pages/
-│   ├── SysMonMainPage.cs         # 主页（列表 + 后端状态）
-│   ├── SensorListPage.cs         # 全量传感器浏览（17 类别）
-│   ├── CpuDetailPage.cs          # CPU 详情（Markdown）
-│   ├── MemoryDetailPage.cs       # 内存详情（Markdown）
-│   ├── DiskDetailPage.cs         # 磁盘详情（列表 + IO）
-│   ├── NetworkDetailPage.cs      # 网络详情（Markdown + 接口列表）
-│   ├── BatteryDetailPage.cs      # 电池详情（Markdown）
-│   └── GpuDetailPage.cs          # GPU 详情（Markdown）
-├── Services/
-│   ├── SystemInfoService.cs      # 系统数据采集（P/Invoke） + 传感器回退链
-│   ├── LhmSensorService.cs       # 全量 LHM 传感器分类 + 健康追踪
-│   └── AmdTempReader.cs          # AMD ADL + HWiNFO 共享内存回退
-├── Models/
-│   ├── SensorReading.cs          # 传感器模型（17 类别枚举 + 配置）
-│   └── SensorCategoryMeta.cs     # 类别元数据 + 图标缓存
-└── Assets/                       # MSIX 图标资源
+sysmon-cmdpal/
+├── SysMonCmdPal.sln
+├── SysMonCmdPal/                         # 主扩展项目 (MSIX, 商店安全)
+│   ├── SysMonCmdPal.csproj               # .NET 10 + MSIX + AOT/Trim
+│   ├── Package.appxmanifest              # MSIX 包清单 + CmdPal 扩展声明
+│   ├── Program.cs                        # COM Server 入口点
+│   ├── SysMonExtension.cs                # IExtension 实现 + SharedMemoryReader 生命周期
+│   ├── SysMonCommandsProvider.cs         # 顶级命令 + Dock Band 注册 + 设置
+│   ├── Broker/
+│   │   ├── ISysMonBrokerPush.cs          # COM 接口定义（Broker 推送契约）
+│   │   ├── BrokerPushReceiver.cs         # 接收器 + 不可变快照 + 全量传感器存储
+│   │   ├── BrokerDetector.cs             # Broker 进程存在性检测
+│   │   ├── SharedMemoryReader.cs         # v2 布局读取器（CPU/GPU/全量传感器）
+│   │   └── ShmLayout.cs                  # 共享内存布局常量 + 传感器分类标签
+│   ├── Commands/
+│   │   ├── SysMonDockBands.cs            # DockFormat + DockBandRefreshCoordinator + 7 Band
+│   │   └── BtopLauncherCommand.cs        # btop4win 一键启动
+│   ├── Pages/
+│   │   ├── SysMonMainPage.cs             # 主页列表
+│   │   ├── CpuDetailPage.cs              # CPU Markdown
+│   │   ├── MemoryDetailPage.cs           # 内存 Markdown
+│   │   ├── DiskDetailPage.cs             # 磁盘 ListPage
+│   │   ├── NetworkDetailPage.cs          # 网络 Markdown
+│   │   ├── BatteryDetailPage.cs          # 电池 Markdown
+│   │   ├── GpuDetailPage.cs              # GPU Markdown
+│   │   └── SensorListPage.cs             # 全量传感器浏览
+│   ├── Services/
+│   │   ├── SystemInfoService.cs      # 系统数据聚合器 (1s Refresh, 加锁)
+│   │   ├── CpuSensorReader.cs        # CPU 温度三层回退
+│   │   ├── CpuFrequencyReader.cs     # CPU 频率 (任务管理器算法)
+│   │   ├── GpuSensorReader.cs        # GPU 数据五层回退
+│   │   ├── GpuAdapterEnumerator.cs   # DXGI COM interop GPU 枚举
+│   │   ├── D3dkmtGpuReader.cs        # D3DKMT API GPU 利用率 (无需管理员)
+│   │   ├── PdhGpuReader.cs           # PDH PerformanceCounter GPU 利用率
+│   │   ├── HwinfoSharedMemoryReader.cs # HWiNFO SHM 读取
+│   │   ├── ThermalZoneReader.cs      # ACPI 热区
+│   │   ├── DiskMonitor.cs            # 磁盘 IO (WMI 缓存 30s)
+│   │   ├── NetworkMonitor.cs         # 网络流量 (接口缓存 10s)
+│   │   ├── BatteryQueryService.cs    # WMI 电池趋势检测 (缓存 3s)
+│   │   ├── SensorLogger.cs           # 传感器日志
+│   │   └── SparklineChart.cs         # PNG/SVG 火花线渲染
+│   └── Models/
+│       └── SensorChainConfig.cs          # 精简版配置
+├── SysMonCmdPal.Tests/                   # 自动化测试 (xUnit)
+├── SysMonBroker/                         # 可选提权代理 v2.3 (独立分发)
+│   ├── SysMonBroker.csproj               # .NET 10 WinExe, 自包含/单文件
+│   ├── Program.cs                        # LHM 采集 + SHM 写入
+│   ├── IPC/
+│   │   └── BrokerSharedMemory.cs         # v2 布局: 16KB SHM 写入
+│   ├── Logging/
+│   │   └── BrokerLogger.cs               # 缓冲 + 轮转日志
+│   └── Sensors/
+│       └── SensorCollector.cs            # LHM 全量传感器采集
+└── LhmTest/                              # LHM 独立测试工具
 ```
 
 ## 关联项目
@@ -133,7 +194,6 @@ SysMonCmdPal/
 - [btop4win](https://github.com/aristocratos/btop4win) — C++ 系统监控（Win32 API 参考实现）
 - [PowerToys](https://github.com/microsoft/PowerToys) — Command Palette 宿主
 - [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) — 硬件传感器库
-- [PawnIO](https://pawnio.eu) — 免管理员硬件传感器驱动
 
 ## License
 

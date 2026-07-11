@@ -16,8 +16,7 @@ public class Program
         if (args.Length > 0 && args[0] == "-RegisterProcessAsComServer")
         {
             using var server = new ExtensionServer();
-
-            ManualResetEvent extensionDisposedEvent = new(false);
+            using var extensionDisposedEvent = new ManualResetEvent(false);
 
             var extensionInstance = new SysMonExtension(extensionDisposedEvent);
             server.RegisterExtension(() => extensionInstance);
