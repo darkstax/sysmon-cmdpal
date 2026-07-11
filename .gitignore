@@ -29,3 +29,10 @@ Desktop.ini
 # Certificates
 *.pfx
 *.cer
+# 暂存 → 发布目录
+release/
+# VS Installer 配置（一次性安装用）
+.vsconfig
+# Mono 密封缓存
+.mono/
+SysMonCmdPal/.mono/
