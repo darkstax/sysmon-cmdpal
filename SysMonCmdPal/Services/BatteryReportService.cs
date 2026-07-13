@@ -94,7 +94,18 @@ internal sealed class BatteryReportService
             };
             using var p = Process.Start(psi);
             if (p is null) return null;
-            p.WaitForExit(15000);
+
+            var stdoutTask = p.StandardOutput.ReadToEndAsync();
+            var stderrTask = p.StandardError.ReadToEndAsync();
+            if (!p.WaitForExit(15000))
+            {
+                try { p.Kill(entireProcessTree: true); }
+                catch { }
+                return null;
+            }
+
+            _ = stdoutTask.GetAwaiter().GetResult();
+            _ = stderrTask.GetAwaiter().GetResult();
             if (p.ExitCode != 0 || !File.Exists(tempHtml)) return null;
 
             string html = File.ReadAllText(tempHtml);

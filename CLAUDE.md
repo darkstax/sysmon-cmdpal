@@ -36,9 +36,11 @@ SysMonCmdPal.exe (MSIX 扩展, runFullTrust, 用户态)
     │     Tier 3: PDH PerformanceCounter (用户态, GPU Engine 计数器, 无需管理员)
     │     CPU 温度: ThermalZone (Windows ACPI PerformanceCounter, 精度差 5-15°C)
     ├── SystemInfoService.Refresh() (1s 定时 → SystemSnapshot, Interlocked 防并发)
-    │     + CPU% (PerformanceCounter, 异常自动重建) / CPU 频率 (基础频率 × 性能百分比 / 100)
-    │       内存 (GlobalMemoryStatusEx) / 磁盘 (DriveInfo + LogicalDisk, 物理磁盘缓存 30s)
-    │       网络 (物理接口 delta + EMA, 接口列表缓存 10s) / 电池 (GetSystemPowerStatus + WMI 趋势检测, 缓存 3s)
+    │     + CpuUsageReader (PerformanceCounter, 异常自动重建)
+    │     + CpuFrequencyReader (基础频率 × 性能百分比 / 100)
+    │     + SystemMemoryReader (GlobalMemoryStatusEx)
+    │     + SystemBatteryReader (GetSystemPowerStatus + WMI 趋势检测)
+    │     + DiskMonitor / NetworkMonitor / Sensor readers
     ├── DockBandRefreshCoordinator (共享 1s timer, Interlocked.Exchange 防并发, 引用计数)
     │     → 7 个静态 Dock Band (CPU/内存/磁盘/下载/上传/电池/GPU) + 动态传感器 Band
     │     所有详情页通过 Subscribe(Update) 共享此 timer (不再有独立 timer)
@@ -47,11 +49,13 @@ SysMonCmdPal.exe (MSIX 扩展, runFullTrust, 用户态)
 
 **权限分层**：主扩展为 `runFullTrust`（Package.appxmanifest 声明），始终用户态运行。仅可选 Broker 以管理员独立运行（不在 MSIX 内，独立分发），通过 SHM 把高精度数据"喂"回主扩展。Broker 缺席时主扩展自动降级：HWiNFO → D3DKMT → PDH → ThermalZone。D3DKMT 和 PDH 完全不需要管理员权限或第三方工具。
 
+**配置现状**：`SensorChainConfig` 只保留 `settings.json` 的历史兼容读取/写回。`PrecisionMode` 不再暴露 CmdPal 手动切换入口，也不会覆盖自动回退链。
+
 ## 2. 代码仓库文件结构
 
 ```
 sysmon-cmdpal/
-├── SysMonCmdPal.sln              # 解决方案（只含主扩展 + 2 个 PowerToys SDK 项目；Broker/Tests/LhmTest 不在 sln，各自独立构建）
+├── SysMonCmdPal.sln              # 解决方案（当前含主扩展、Broker、Tests、LhmTest；PowerToys SDK 通过项目引用解析）
 ├── global.json                   # .NET SDK 10.0.300, rollForward=latestPatch
 ├── CLAUDE.md / README.md
 ├── setup.ps1 / deploy.ps1 / dev-deploy.ps1 / verify.ps1   # 构建/部署脚本
@@ -74,9 +78,13 @@ sysmon-cmdpal/
 │   │   ├── SharedMemoryReader.cs     # v2 SHM 布局读取器（CPU/GPU/全量传感器）
 │   │   └── ShmLayout.cs              # SHM 布局常量 + 传感器分类标签
 │   ├── Commands/
-│   │   ├── SysMonDockBands.cs        # DockFormat + DockBandRefreshCoordinator + 7 静态 Band
+│   │   ├── DockFormat.cs             # Dock 栏速度/温度/百分比格式化
+│   │   ├── DockBandRefreshCoordinator.cs # 共享 1s 刷新协调器
+│   │   ├── CpuDockBand.cs / MemoryDockBand.cs / DiskDockBand.cs
+│   │   ├── NetworkDockBands.cs / BatteryDockBand.cs / GpuDockBand.cs
 │   │   └── BtopLauncherCommand.cs    # btop4win 一键启动 (scoop/PATH + Windows Terminal)
-│   ├── Pages/                    # 8 个详情页
+│   ├── Pages/                    # 详情页 + 共享刷新基类
+│   │   ├── RefreshingContentPage.cs # FormContent 详情页共享 Subscribe/Unsubscribe
 │   │   ├── SysMonMainPage.cs         # 主面板列表
 │   │   ├── CpuDetailPage.cs          # CPU Markdown (+HWiNFO 12h 警告)
 │   │   ├── MemoryDetailPage.cs       # 内存 Markdown
@@ -86,9 +94,12 @@ sysmon-cmdpal/
 │   │   ├── GpuDetailPage.cs          # GPU Markdown + VRAM + 后端状态
 │   │   └── SensorListPage.cs         # 全量传感器浏览（按类别分组）
 │   ├── Services/                 # 数据采集 + 回退链
-│   │   ├── SystemInfoService.cs      # 系统数据聚合器（1s Refresh → SystemSnapshot, 加锁）
-│   │   ├── CpuSensorReader.cs        # CPU 温度三层回退
+│   │   ├── SystemInfoService.cs      # 系统数据聚合器（1s Refresh → SystemSnapshot, 图表推进）
+│   │   ├── CpuUsageReader.cs         # CPU PerformanceCounter 读取 + 自动重建
 │   │   ├── CpuFrequencyReader.cs     # CPU 频率 (任务管理器算法: base×perf%/100)
+│   │   ├── SystemMemoryReader.cs     # GlobalMemoryStatusEx 内存读取
+│   │   ├── SystemBatteryReader.cs    # GetSystemPowerStatus 电池读取 + 状态判定
+│   │   ├── CpuSensorReader.cs        # CPU 温度三层回退
 │   │   ├── GpuSensorReader.cs        # GPU 数据五层回退
 │   │   ├── GpuAdapterEnumerator.cs   # DXGI COM interop 枚举 GPU adapter (LUID→名称, 缓存 30s)
 │   │   ├── D3dkmtGpuReader.cs        # D3DKMT API GPU 利用率 (gdi32.dll, per-engine RunningTime delta)
@@ -103,7 +114,7 @@ sysmon-cmdpal/
 │   │   ├── PdChargerDetector.cs      # USB-C/PD 充电检测 (SetupAPI)
 │   │   ├── SensorLogger.cs           # 共享传感器日志
 │   │   └── SparklineChart.cs         # 纯托管 PNG/SVG 火花线渲染
-│   ├── Models/SensorChainConfig.cs   # 精简配置: 版本号 (PrecisionMode 设置已移除)
+│   ├── Models/SensorChainConfig.cs   # 精简配置: 版本号 + 旧 PrecisionMode 兼容字段（无 CmdPal 切换 UI）
 │   ├── Localization/Loc.cs           # i18n 辅助
 │   ├── Strings/en-US/Resources.resw  # 英文资源
 │   ├── Strings/zh-CN/Resources.resw  # 中文资源
@@ -112,7 +123,7 @@ sysmon-cmdpal/
 │       ├── launchSettings.json
 │       └── PublishProfiles/          # win-x64.pubxml / win-arm64.pubxml
 │
-├── SysMonBroker/                 # 可选提权代理 v2（独立分发，不在 sln）
+├── SysMonBroker/                 # 可选提权代理 v2（也在 sln 中，仍可独立分发）
 │   ├── SysMonBroker.csproj       # .NET 10 WinExe, 自包含/单文件, win-x64 only
 │   ├── Program.cs                # LHM 采集 + SHM 写入 (standalone)
 │   ├── .devmode_marker           # 开发模式标记
@@ -120,7 +131,7 @@ sysmon-cmdpal/
 │   ├── Logging/BrokerLogger.cs   # 缓冲 + 大小轮转日志
 │   └── Sensors/SensorCollector.cs # LHM 全量传感器采集 (CPU/GPU/MB/Storage)
 │
-├── SysMonCmdPal.Tests/           # xUnit 测试（不在 sln，dotnet test 运行）
+├── SysMonCmdPal.Tests/           # xUnit 测试（也在 sln 中，可单独 dotnet test）
 │   ├── SysMonCmdPal.Tests.csproj
 │   ├── xunit.runner.json
 │   ├── DockFormatTests.cs
@@ -129,7 +140,7 @@ sysmon-cmdpal/
 │   ├── SparklineChartTests.cs
 │   └── SystemInfoServiceTests.cs
 │
-└── LhmTest/                      # LHM 独立测试工具（不在 sln）
+└── LhmTest/                      # LHM 独立测试工具（也在 sln 中，可单独运行）
     ├── LhmTest.csproj
     └── Program.cs
 ```
@@ -139,6 +150,8 @@ sysmon-cmdpal/
 **SDK**：.NET 10.0.300+（`global.json` 锁定，`rollForward=latestPatch`）。需要 Windows 11 + PowerToys 已安装 + 开发者模式。
 
 **MSBuild（主扩展 MSIX 打包）**：VS Build Tools 2026 自带的 MSBuild，路径固定为 `${env:ProgramFiles(x86)}\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe`。主扩展必须用 MSBuild 而非 `dotnet build`，因为 MSIX 打包 (`GenerateAppxPackageOnBuild`) 依赖 MSBuild 的 AppX 工具链。
+
+**重要：编译/测试必须调用宿主机 Windows 工具链。** 当前仓库通常从 WSL 访问，但主扩展依赖 Windows App SDK / CsWinRT / MSIX AppX 工具链；不要把 WSL/Linux 下的 `dotnet build` / `dotnet test` 失败当作最终结果。需要从 WSL 调用宿主机 `pwsh.exe` + Windows MSBuild，项目路径用 `wslpath -w` 转成 `\\wsl.localhost\...` UNC 路径。
 
 ```powershell
 $msbuild = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
@@ -152,7 +165,7 @@ $msbuild = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\18\BuildTools\MSBui
 Start-Process 'x-cmdpal://reload'   # 重载命令面板
 ```
 
-**dotnet CLI（Broker / Tests / LhmTest，均不在 .sln 内）**：
+**dotnet CLI（Broker / Tests / LhmTest 也可独立使用）**：
 
 ```powershell
 # SysMonBroker：自包含单文件发布（独立分发，需管理员运行）
@@ -163,6 +176,18 @@ dotnet test SysMonCmdPal.Tests\SysMonCmdPal.Tests.csproj
 
 # LhmTest（调试用）
 dotnet run --project LhmTest\LhmTest.csproj
+```
+
+**WSL 调宿主机验证示例**：
+
+```bash
+root_win="$(wslpath -w /home/starl/ai-code/sysmon-cmdpal)"
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -Command "\
+  `$ErrorActionPreference='Stop'; \
+  `$root='${root_win}'; \
+  `$msbuild='C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe'; \
+  Set-Location `$root; \
+  & `$msbuild 'SysMonCmdPal.sln' /m /restore /p:Configuration=Debug /p:Platform=x64 /v:minimal"
 ```
 
 **平台**：主扩展 `x64` + `ARM64`；Broker 仅 `win-x64`（自包含）。PowerToys SDK 通过 `PowerToys-sdk/` 符号链接解析，或设置 `POWERTOYS_REPO` 环境变量指向完整 PowerToys 仓库。

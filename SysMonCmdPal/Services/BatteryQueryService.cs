@@ -7,6 +7,7 @@
 // 但 RemainingCapacity 趋势是真相——容量在掉就是电池在输出功率。
 
 using System.Diagnostics;
+using System.Globalization;
 using System.Management;
 
 namespace SysMonCmdPal;
@@ -47,6 +48,7 @@ internal sealed class BatteryQueryService
     private BatteryStatusInfo? _cached;
     private DateTime _cacheTime = DateTime.MinValue;
     private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(3);
+    private readonly object _lock = new();
 
     private BatteryQueryService() { }
 
@@ -55,10 +57,21 @@ internal sealed class BatteryQueryService
     /// </summary>
     public BatteryStatusInfo GetStatus()
     {
-        // P4: 3 秒缓存 — 电池状态变化缓慢，不需要每秒 WMI 查询
-        if (_cached != null && (DateTime.UtcNow - _cacheTime) < CacheTtl)
-            return _cached;
+        lock (_lock)
+        {
+            // P4: 3 秒缓存 — 电池状态变化缓慢，不需要每秒 WMI 查询
+            if (_cached != null && (DateTime.UtcNow - _cacheTime) < CacheTtl)
+                return _cached;
 
+            var info = QueryStatusCore();
+            _cached = info;
+            _cacheTime = DateTime.UtcNow;
+            return info;
+        }
+    }
+
+    private BatteryStatusInfo QueryStatusCore()
+    {
         var info = new BatteryStatusInfo();
         try
         {
@@ -69,36 +82,39 @@ internal sealed class BatteryQueryService
             {
                 try
                 {
-                    info.ChargeRateMw = Convert.ToInt32(obj["ChargeRate"]);
-                    info.DischargeRateMw = Convert.ToInt32(obj["DischargeRate"]);
-                    info.VoltageMv = Convert.ToInt32(obj["Voltage"]);
-                    info.RemainingCapacityMwh = Convert.ToInt32(obj["RemainingCapacity"]);
-                    info.Charging = Convert.ToBoolean(obj["Charging"]);
-                    info.Discharging = Convert.ToBoolean(obj["Discharging"]);
-                    info.PowerOnline = Convert.ToBoolean(obj["PowerOnline"]);
-                    info.Critical = Convert.ToBoolean(obj["Critical"]);
-                    info.IsValid = true;
+                    info.ChargeRateMw = GetInt(obj, "ChargeRate");
+                    info.DischargeRateMw = GetInt(obj, "DischargeRate");
+                    info.VoltageMv = GetInt(obj, "Voltage");
+                    info.RemainingCapacityMwh = GetInt(obj, "RemainingCapacity");
+                    info.Charging = GetBool(obj, "Charging");
+                    info.Discharging = GetBool(obj, "Discharging");
+                    info.PowerOnline = GetBool(obj, "PowerOnline");
+                    info.Critical = GetBool(obj, "Critical");
+                    info.IsValid = info.RemainingCapacityMwh >= 0;
 
-                    // 趋势检测：RemainingCapacity 下降 = 电池在输出功率
-                    // 5 秒窗口内 mWh 下降 → draining
-                    bool capacityDropped = _lastCapacity >= 0 &&
-                        info.RemainingCapacityMwh < _lastCapacity &&
-                        (DateTime.UtcNow - _lastCapacityTime).TotalSeconds <= 5;
+                    if (info.RemainingCapacityMwh >= 0)
+                    {
+                        // 趋势检测：RemainingCapacity 下降 = 电池在输出功率
+                        // 5 秒窗口内 mWh 下降 → draining
+                        bool capacityDropped = _lastCapacity >= 0 &&
+                            info.RemainingCapacityMwh < _lastCapacity &&
+                            (DateTime.UtcNow - _lastCapacityTime).TotalSeconds <= 5;
 
-                    // 迟滞：一旦判定 draining，保持 10 秒不退回
-                    // 防止 WMI 更新间隔导致 IsDraining 在 true/false 之间闪烁
-                    if (capacityDropped)
-                        _drainingSince = DateTime.UtcNow;
+                        // 迟滞：一旦判定 draining，保持 10 秒不退回
+                        // 防止 WMI 更新间隔导致 IsDraining 在 true/false 之间闪烁
+                        if (capacityDropped)
+                            _drainingSince = DateTime.UtcNow;
 
-                    info.IsDraining = _drainingSince != DateTime.MinValue &&
-                        (DateTime.UtcNow - _drainingSince).TotalSeconds <= 10;
+                        info.IsDraining = _drainingSince != DateTime.MinValue &&
+                            (DateTime.UtcNow - _drainingSince).TotalSeconds <= 10;
 
-                    // 如果容量明确在涨（充电），清除 draining 状态
-                    if (_lastCapacity >= 0 && info.RemainingCapacityMwh > _lastCapacity + 50)
-                        _drainingSince = DateTime.MinValue;
+                        // 如果容量明确在涨（充电），清除 draining 状态
+                        if (_lastCapacity >= 0 && info.RemainingCapacityMwh > _lastCapacity + 50)
+                            _drainingSince = DateTime.MinValue;
 
-                    _lastCapacity = info.RemainingCapacityMwh;
-                    _lastCapacityTime = DateTime.UtcNow;
+                        _lastCapacity = info.RemainingCapacityMwh;
+                        _lastCapacityTime = DateTime.UtcNow;
+                    }
                     break; // 只取第一个电池
                 }
                 finally { obj.Dispose(); } // M5: 释放 WMI COM 对象
@@ -108,8 +124,26 @@ internal sealed class BatteryQueryService
         {
             Debug.WriteLine($"[BatteryQuery] WMI query: {ex.Message}");
         }
-        _cached = info;
-        _cacheTime = DateTime.UtcNow;
         return info;
+    }
+
+    private static int GetInt(ManagementBaseObject obj, string name, int fallback = -1)
+    {
+        try
+        {
+            var value = obj[name];
+            return value is null ? fallback : Convert.ToInt32(value, CultureInfo.InvariantCulture);
+        }
+        catch { return fallback; }
+    }
+
+    private static bool GetBool(ManagementBaseObject obj, string name)
+    {
+        try
+        {
+            var value = obj[name];
+            return value is not null && Convert.ToBoolean(value, CultureInfo.InvariantCulture);
+        }
+        catch { return false; }
     }
 }

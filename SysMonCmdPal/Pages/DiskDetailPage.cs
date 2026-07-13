@@ -5,7 +5,6 @@
 
 using System;
 using System.Linq;
-using System.Timers;
 using Microsoft.CommandPalette.Extensions;
 using Microsoft.CommandPalette.Extensions.Toolkit;
 
@@ -14,10 +13,11 @@ namespace SysMonCmdPal;
 /// <summary>
 /// 一级页面: 物理磁盘列表
 /// </summary>
-internal sealed partial class DiskDetailPage : ListPage
+internal sealed partial class DiskDetailPage : ListPage, IDisposable
 {
     private DiskPartitionsPage[]? _cachedItems;
     private int _cachedCount = -1;
+    private readonly CopyTextCommand _copyCommand = new(string.Empty);
 
     public DiskDetailPage()
     {
@@ -30,24 +30,27 @@ internal sealed partial class DiskDetailPage : ListPage
     {
         // 用已缓存快照，不触发同步 Refresh（避免阻塞 UI）
         var info = SystemInfoService.Instance.Current;
+        _copyCommand.Text = BuildCopyText(info);
 
         var physDisks = info.PhysicalDisks;
         if (physDisks == null || physDisks.Length == 0)
         {
+            SensorLogger.ForceLog($"[DiskDetailPage] fallback logical disks: logical={info.Disks.Length}, physical={(physDisks == null ? "null" : "0")}");
             // WMI 失败回退: 直接按分区列出
-            return info.Disks
-                .Select(d => CreatePartitionListItem(d))
-                .ToArray();
+            return CreateItemsWithCopy(info.Disks.Select(d => CreatePartitionListItem(d)));
         }
+
+        SensorLogger.ForceLog($"[DiskDetailPage] physical disks: count={physDisks.Length}, protocols={string.Join(",", physDisks.Select(d => d.InterfaceType))}");
 
         // 缓存二级页实例 — 磁盘数量固定，复用避免 timer 泄漏
         if (_cachedItems == null || _cachedCount != physDisks.Length)
         {
+            DisposeCachedItems();
             _cachedItems = physDisks.Select(d => new DiskPartitionsPage(d)).ToArray();
             _cachedCount = physDisks.Length;
         }
 
-        return physDisks
+        return CreateItemsWithCopy(physDisks
             .Select((disk, i) =>
             {
                 double totalGB = disk.TotalBytes / (1024.0 * 1024 * 1024);
@@ -60,14 +63,29 @@ internal sealed partial class DiskDetailPage : ListPage
                     ? $"↓{DockFormat.CompactSpeed(disk.ReadBytesPerSec)} ↑{DockFormat.CompactSpeed(disk.WriteBytesPerSec)}  |  "
                     : "";
 
-                return new ListItem(_cachedItems[i])
+                var item = new ListItem(_cachedItems[i])
                 {
                     Title = disk.Model.ToUpper().Trim(),
                     Subtitle = $"{ioStr}{usedPct:F0}% 使用 · {partitions.Length} 分区 · {totalGB:F0} GB{(!string.IsNullOrEmpty(disk.InterfaceType) ? $" · {disk.InterfaceType}" : "")}",
                     Icon = new IconInfo(usedPct > 90 ? "" : ""),
                 };
-            })
-            .ToArray();
+                SensorLogger.ForceLog($"[DiskDetailPage] item target=DiskPartitionsPage title={item.Title} subtitle={item.Subtitle}");
+                return item;
+            }));
+    }
+
+    private IListItem[] CreateItemsWithCopy(IEnumerable<IListItem> items)
+    {
+        return
+        [
+            new ListItem(_copyCommand)
+            {
+                Title = Loc.Get("Common.CopyCurrentMetrics"),
+                Subtitle = _copyCommand.Text,
+                Icon = new IconInfo(""),
+            },
+            .. items,
+        ];
     }
 
     /// <summary>预渲染：先 GetItems 创建缓存实例，再启动所有二级页定时器</summary>
@@ -87,6 +105,46 @@ internal sealed partial class DiskDetailPage : ListPage
             foreach (var item in _cachedItems)
                 item.StartTimer();
         }
+    }
+
+    public void Dispose() => DisposeCachedItems();
+
+    private void DisposeCachedItems()
+    {
+        if (_cachedItems == null) return;
+        foreach (var item in _cachedItems)
+            item.Dispose();
+        _cachedItems = null;
+        _cachedCount = -1;
+    }
+
+    private static string BuildCopyText(SystemSnapshot info)
+    {
+        if (info.PhysicalDisks is { Length: > 0 })
+        {
+            double totalRead = info.PhysicalDisks.Sum(d => Math.Max(0, d.ReadBytesPerSec));
+            double totalWrite = info.PhysicalDisks.Sum(d => Math.Max(0, d.WriteBytesPerSec));
+            long totalBytes = info.PhysicalDisks.Sum(d => d.TotalBytes);
+            long usedBytes = info.PhysicalDisks.Sum(d =>
+            {
+                var partitions = d.Partitions ?? [];
+                return partitions.Sum(p => p.TotalBytes - p.FreeBytes);
+            });
+            string usedPct = totalBytes > 0 ? $"{usedBytes * 100.0 / totalBytes:F0}% used" : Loc.Get("Common.NA");
+            return $"Disk ↓ {DockFormat.Speed(totalRead)} · ↑ {DockFormat.Speed(totalWrite)} · {usedPct}";
+        }
+
+        if (info.Disks is { Length: > 0 })
+        {
+            double totalRead = info.Disks.Sum(d => Math.Max(0, d.ReadBytesPerSec));
+            double totalWrite = info.Disks.Sum(d => Math.Max(0, d.WriteBytesPerSec));
+            long totalBytes = info.Disks.Sum(d => d.TotalBytes);
+            long usedBytes = info.Disks.Sum(d => d.TotalBytes - d.FreeBytes);
+            string usedPct = totalBytes > 0 ? $"{usedBytes * 100.0 / totalBytes:F0}% used" : Loc.Get("Common.NA");
+            return $"Disk ↓ {DockFormat.Speed(totalRead)} · ↑ {DockFormat.Speed(totalWrite)} · {usedPct}";
+        }
+
+        return $"Disk ↓ {Loc.Get("Common.NA")} · ↑ {Loc.Get("Common.NA")} · {Loc.Get("Common.NA")}";
     }
 
     internal static ListItem CreatePartitionListItem(DiskInfo d)
@@ -109,11 +167,10 @@ internal sealed partial class DiskDetailPage : ListPage
 /// <summary>
 /// 二级页面: 某物理磁盘的详情（FormContent hero 布局 + 双图表）
 /// </summary>
-internal sealed partial class DiskPartitionsPage : ContentPage
+internal sealed partial class DiskPartitionsPage : RefreshingContentPage
 {
     private readonly PhysicalDiskInfo _disk;
     private readonly FormContent _form = new();
-    private bool _subscribed;
     private readonly SparklineChart _readChart = new(maxPoints: 60, metric: ChartMetric.Disk);
     private readonly SparklineChart _writeChart = new(maxPoints: 60, metric: ChartMetric.DiskWrite);
 
@@ -323,21 +380,13 @@ internal sealed partial class DiskPartitionsPage : ContentPage
         _form.DataJson = """{"diskName":"—","readSpeed":"—","writeSpeed":"—","usedPct":"—","totalGB":"—","iface":"—","readScale":"","writeScale":"","readChartUrl":"","writeChartUrl":""}""";
     }
 
-    public void StartTimer()
-    {
-        if (_subscribed) return;
-        _subscribed = true;
-        DockBandRefreshCoordinator.Subscribe(Update);
-        ThreadPool.QueueUserWorkItem(_ => Update());
-    }
-
     public override IContent[] GetContent()
     {
         StartTimer();
         return [_form];
     }
 
-    private void Update()
+    protected override void RefreshContent()
     {
         try
         {
@@ -347,6 +396,9 @@ internal sealed partial class DiskPartitionsPage : ContentPage
             var refreshed = sys.Current.PhysicalDisks;
             var disk = Array.Find(refreshed, d => d.Model == _disk.Model && d.SerialNumber == _disk.SerialNumber);
             if (disk.Model == null && disk.SerialNumber == null) disk = _disk;
+            string diskName = string.IsNullOrWhiteSpace(disk.Model)
+                ? "DISK"
+                : disk.Model.ToUpperInvariant().Trim();
 
             // Push IO 速度到图表
             _readChart.PushRaw((float)(Math.Max(0, disk.ReadBytesPerSec) / 1_000_000.0));
@@ -366,7 +418,7 @@ internal sealed partial class DiskPartitionsPage : ContentPage
 
             var data = new Dictionary<string, string>
             {
-                ["diskName"] = disk.Model.ToUpper().Trim(),
+                ["diskName"] = diskName,
                 ["readSpeed"] = DockFormat.Speed(disk.ReadBytesPerSec),
                 ["writeSpeed"] = DockFormat.Speed(disk.WriteBytesPerSec),
                 ["usedPct"] = $"{usedPct:F0}%",

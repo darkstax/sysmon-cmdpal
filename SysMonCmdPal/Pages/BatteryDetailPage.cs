@@ -3,16 +3,14 @@
 // 实时区（每秒）：电量/状态/剩余时间/省电模式
 // 健康区（30天缓存）：设计容量/满充容量/健康度/型号/制造商/循环次数
 
-using System.Timers;
 using Microsoft.CommandPalette.Extensions;
 using Microsoft.CommandPalette.Extensions.Toolkit;
 
 namespace SysMonCmdPal;
 
-internal sealed partial class BatteryDetailPage : ContentPage
+internal sealed partial class BatteryDetailPage : RefreshingContentPage
 {
     private readonly FormContent _form = new();
-    private bool _subscribed;
 
     private const string Template = """
     {
@@ -272,15 +270,7 @@ internal sealed partial class BatteryDetailPage : ContentPage
         Title = Loc.Get("Battery.PageTitle");
         Name = Loc.Get("Dock.Battery");
         _form.TemplateJson = Template;
-        _form.DataJson = """{"batteryModel":"—","batteryPercent":"—","batteryStatus":"—","batteryRemaining":"—","batterySaver":"—","powerInfo":"—","powerLabel":"充放电功率 / 电压","isDual":false,"dualSystemPower":"—","dualInjectPower":"—","dualBatteryPower":"—","dualVoltage":"","healthInfo":"加载中…","capacityInfo":"","lastUpdated":""}""";
-    }
-
-    public void StartTimer()
-    {
-        if (_subscribed) return;
-        _subscribed = true;
-        DockBandRefreshCoordinator.Subscribe(Update);
-        ThreadPool.QueueUserWorkItem(_ => Update());
+        _form.DataJson = """{"batteryModel":"—","batteryPercent":"—","batteryStatus":"—","batteryRemaining":"—","batterySaver":"—","powerInfo":"—","powerLabel":"充放电功率 / 电压","isDual":"false","dualSystemPower":"—","dualInjectPower":"—","dualBatteryPower":"—","dualVoltage":"","healthInfo":"加载中…","capacityInfo":"","lastUpdated":""}""";
     }
 
     public override IContent[] GetContent()
@@ -289,7 +279,7 @@ internal sealed partial class BatteryDetailPage : ContentPage
         return [_form];
     }
 
-    private void Update()
+    protected override void RefreshContent()
     {
         try
         {

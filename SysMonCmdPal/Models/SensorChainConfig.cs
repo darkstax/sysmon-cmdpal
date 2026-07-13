@@ -1,6 +1,6 @@
 // Copyright (c) 2026 SysMonCmdPal
-// 精简版传感器配置 — 仅保留精度模式和版本号
-// 传感器链和 GPU 模式已移除，CpuSensorReader / GpuSensorReader 独立工作
+// 精简版传感器配置 — 仅保留版本号和旧 PrecisionMode 兼容字段
+// 运行时数据源选择已改为自动回退链；这里只负责兼容历史 settings.json
 //
 // IMPORTANT: This project uses AOT/Trim in Release. Reflection-based JSON
 // serialization is disabled by the trimmer, so we MUST use JsonSerializerContext
@@ -14,24 +14,28 @@ using System.Text.Json.Serialization;
 
 namespace SysMonCmdPal;
 
-/// <summary>高精度模式 — 决定最高精度的数据源</summary>
+/// <summary>旧 PrecisionMode 配置值的兼容枚举；运行时不再提供手动切换。</summary>
 public enum PrecisionMode
 {
-    /// <summary>不使用高精度源，仅 ACPI ThermalZone</summary>
+    /// <summary>历史上的非高精度模式；当前仅用于兼容旧配置。</summary>
     None,
-    /// <summary>使用 Broker 共享内存推送（最精准，需 SysMonBroker 运行）</summary>
+    /// <summary>历史上的 Broker 偏好；当前自动回退链会自行检测 Broker。</summary>
     Broker,
 }
 
 /// <summary>
-/// 精简版传感器配置。存储在 settings.json 中，与 CmdPal 设置页面同步。
+/// 精简版传感器配置。存储在 settings.json 中。
+/// PrecisionMode 相关字段仅用于兼容历史配置，当前没有 CmdPal 手动切换入口。
 /// </summary>
 public sealed class SensorChainConfig
 {
     /// <summary>配置版本号</summary>
     public string Version { get; set; } = "4";
 
-    /// <summary>高精度模式（默认 "None"，需手动切换到 Broker）</summary>
+    /// <summary>
+    /// 历史序列化字段。保留以便继续读取/写回旧 settings.json，
+    /// 但运行时数据源选择始终走自动回退链。
+    /// </summary>
     public string PrecisionModeStr { get; set; } = "None";
 
     [JsonIgnore]
@@ -45,7 +49,7 @@ public sealed class SensorChainConfig
         set => PrecisionModeStr = value.ToString();
     }
 
-    /// <summary>旧版兼容: HighPrecision = PrecisionMode != None</summary>
+    /// <summary>旧版兼容投影: HighPrecision = PrecisionMode != None。</summary>
     [JsonIgnore]
     public bool HighPrecision => PrecisionMode != PrecisionMode.None;
 

@@ -9,8 +9,8 @@ namespace SysMonBroker.Logging;
 public static class BrokerLogger
 {
     private static readonly string LogPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "SysMonCmdPal", "broker.log");
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "SysMonCmdPal", "Logs", "broker.log");
 
     private const long MaxLogSize = 10 * 1024 * 1024;
 

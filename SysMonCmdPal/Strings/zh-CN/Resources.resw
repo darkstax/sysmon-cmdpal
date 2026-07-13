@@ -45,6 +45,9 @@
   <data name="Common.SensorBackendLabel" xml:space="preserve">
     <value>传感器后端: {0}</value>
   </data>
+  <data name="Common.CopyCurrentMetrics" xml:space="preserve">
+    <value>复制当前指标</value>
+  </data>
 
   <!-- ==================== Backend status ==================== -->
   <data name="Backend.Broker" xml:space="preserve">
@@ -176,6 +179,18 @@
   <data name="MainPage.SensorSubtitleConnected" xml:space="preserve">
     <value>Broker 已连接 · {0} 个传感器</value>
   </data>
+  <data name="MainPage.SensorSubtitleNoData" xml:space="preserve">
+    <value>Broker 已连接 · 暂无传感器数据</value>
+  </data>
+  <data name="MainPage.SensorSubtitleStale" xml:space="preserve">
+    <value>Broker 数据已过期 · 距上次更新 {0} 秒</value>
+  </data>
+  <data name="MainPage.SensorSubtitleError" xml:space="preserve">
+    <value>Broker 共享内存错误 · {0}</value>
+  </data>
+  <data name="MainPage.SensorSubtitleUnavailable" xml:space="preserve">
+    <value>Broker 共享内存不可用</value>
+  </data>
   <data name="MainPage.SensorSubtitleDisconnected" xml:space="preserve">
     <value>需要 SysMonBroker 运行中</value>
   </data>
@@ -300,6 +315,15 @@
   <data name="Sensor.NoDataAlive" xml:space="preserve">
     <value>Broker 已连接但暂无传感器数据</value>
   </data>
+  <data name="Sensor.NoDataStale" xml:space="preserve">
+    <value>Broker 数据已过期 · 距上次更新 {0} 秒</value>
+  </data>
+  <data name="Sensor.NoDataError" xml:space="preserve">
+    <value>Broker 共享内存错误: {0}</value>
+  </data>
+  <data name="Sensor.NoDataUnavailable" xml:space="preserve">
+    <value>Broker 共享内存不可用，请以管理员权限启动 SysMonBroker。</value>
+  </data>
   <data name="Sensor.NoDataDead" xml:space="preserve">
     <value>需要 SysMonBroker 运行中（管理员权限）</value>
   </data>
@@ -308,6 +332,12 @@
   </data>
   <data name="Sensor.EmptyListDetail" xml:space="preserve">
     <value>LHM 未检测到任何可用传感器</value>
+  </data>
+  <data name="Sensor.BrowseCount" xml:space="preserve">
+    <value>{0} 个传感器</value>
+  </data>
+  <data name="Sensor.CategoryEmptyDetail" xml:space="preserve">
+    <value>{0} 下暂无匹配传感器</value>
   </data>
   <data name="Sensor.ItemTitle" xml:space="preserve">
     <value>{0}: {1}</value>
@@ -457,5 +487,28 @@
   </data>
   <data name="SensorCategory.StorageLoad" xml:space="preserve">
     <value>存储负载</value>
+  </data>
+
+  <!-- ==================== Sensor browse groups ==================== -->
+  <data name="SensorBrowse.Temperature" xml:space="preserve">
+    <value>温度</value>
+  </data>
+  <data name="SensorBrowse.Load" xml:space="preserve">
+    <value>使用率 / 负载</value>
+  </data>
+  <data name="SensorBrowse.Power" xml:space="preserve">
+    <value>功耗</value>
+  </data>
+  <data name="SensorBrowse.Fan" xml:space="preserve">
+    <value>风扇</value>
+  </data>
+  <data name="SensorBrowse.Frequency" xml:space="preserve">
+    <value>频率</value>
+  </data>
+  <data name="SensorBrowse.Voltage" xml:space="preserve">
+    <value>电压</value>
+  </data>
+  <data name="SensorBrowse.Storage" xml:space="preserve">
+    <value>存储</value>
   </data>
 </root>

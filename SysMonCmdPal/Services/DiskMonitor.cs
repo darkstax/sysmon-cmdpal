@@ -4,6 +4,8 @@
 
 using System.Diagnostics;
 using System.Management;
+using System.Text;
+using System.Text.Json;
 
 namespace SysMonCmdPal;
 
@@ -69,16 +71,18 @@ internal sealed class DiskMonitor
         // P3: 30 秒缓存 — 物理磁盘结构极少变化
         if (_cachedPhysicalDisks != null && (DateTime.UtcNow - _physDiskCacheTime) < PhysDiskCacheTtl)
         {
-            // 仍需更新 IO 速度（从最新的逻辑磁盘数据汇总）
-            UpdatePhysicalDiskIO(_cachedPhysicalDisks, logicalDisks);
-            return _cachedPhysicalDisks;
+            // 仍需更新 IO 速度（从最新的逻辑磁盘数据汇总）。复制缓存后再更新，
+            // 避免修改已经发布给 UI 的 SystemSnapshot 数组实例。
+            var snapshot = ClonePhysicalDisks(_cachedPhysicalDisks);
+            UpdatePhysicalDiskIO(snapshot, logicalDisks);
+            return snapshot;
         }
 
         try
         {
             // 1. 查询所有物理磁盘（P3: 合并 DeviceID 到第一次查询，消除重复 WMI 调用）
             var physDisks = new List<PhysicalDiskInfo>();
-            var diskDeviceIds = new List<string>();
+            var diskDriveLetters = new List<List<string>>();
             using (var searcher = new ManagementObjectSearcher(
                 "SELECT Model, SerialNumber, Size, InterfaceType, Index, PNPDeviceID, MediaType, DeviceID FROM Win32_DiskDrive"))
             using (var collection = searcher.Get())
@@ -94,8 +98,6 @@ internal sealed class DiskMonitor
                         var pnpId = disk["PNPDeviceID"] as string ?? "";
                         var iface = disk["InterfaceType"] as string ?? "";
                         var mediaType = disk["MediaType"] as string ?? "";
-                        var devId = disk["DeviceID"] as string ?? "";
-
                         var pdi = new PhysicalDiskInfo
                         {
                             Model = disk["Model"] as string ?? "Unknown Disk",
@@ -107,7 +109,7 @@ internal sealed class DiskMonitor
                             WriteBytesPerSec = 0,
                         };
                         physDisks.Add(pdi);
-                        diskDeviceIds.Add(devId);
+                        diskDriveLetters.Add(GetLogicalDriveLetters(disk));
                     }
                     finally { disk.Dispose(); }
                 }
@@ -115,75 +117,10 @@ internal sealed class DiskMonitor
 
             if (physDisks.Count == 0) return [];
 
-            var diskToPartitions = new Dictionary<int, List<string>>(); // physDiskIndex → partition DeviceIDs
-            for (int i = 0; i < physDisks.Count; i++)
-            {
-                var partDeviceIds = new List<string>();
-                var physicalDriveId = diskDeviceIds[i];
-                if (!string.IsNullOrEmpty(physicalDriveId))
-                {
-                    try
-                    {
-                        // ASSOCIATORS OF 直接用原始 DeviceID，不需要转义
-                        // (PowerShell 和 C# 测试均确认：转义反斜杠会导致查询失败)
-                        using var partSearcher = new ManagementObjectSearcher(
-                            $"ASSOCIATORS OF {{Win32_DiskDrive.DeviceID='{physicalDriveId}'}} WHERE ResultClass=Win32_DiskPartition");
-                        using var parts = partSearcher.Get();
-                        foreach (ManagementObject part in parts)
-                        {
-                            try
-                            {
-                                var partDeviceId = part["DeviceID"] as string;
-                                if (!string.IsNullOrEmpty(partDeviceId))
-                                    partDeviceIds.Add(partDeviceId);
-                            }
-                            finally { part.Dispose(); }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.WriteLine($"[SysMon] Disk partition assoc (index={i}): {ex.Message}");
-                    }
-                }
-                diskToPartitions[i] = partDeviceIds;
-            }
-
-            // 3. 查每个分区关联的逻辑磁盘（盘符）
-            var diskToDriveLetters = new Dictionary<int, List<string>>();
-            for (int i = 0; i < physDisks.Count; i++)
-            {
-                var driveLetters = new List<string>();
-                foreach (var partDeviceId in diskToPartitions.GetValueOrDefault(i) ?? new List<string>())
-                {
-                    try
-                    {
-                        // ASSOCIATORS OF 直接用原始 DeviceID，不需要转义
-                        using var ldSearcher = new ManagementObjectSearcher(
-                            $"ASSOCIATORS OF {{Win32_DiskPartition.DeviceID='{partDeviceId}'}} WHERE ResultClass=Win32_LogicalDisk");
-                        using var lds = ldSearcher.Get();
-                        foreach (ManagementObject ld in lds)
-                        {
-                            try
-                            {
-                                var driveLetter = ld["DeviceID"] as string;  // e.g. "C:"
-                                if (!string.IsNullOrEmpty(driveLetter))
-                                    driveLetters.Add(driveLetter + "\\");
-                            }
-                            finally { ld.Dispose(); }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.WriteLine($"[SysMon] LogicalDisk assoc (part={partDeviceId}): {ex.Message}");
-                    }
-                }
-                diskToDriveLetters[i] = driveLetters;
-            }
-
             // 4. 把逻辑分区挂到物理磁盘上 + 汇总 IO
             for (int i = 0; i < physDisks.Count; i++)
             {
-                var letters = diskToDriveLetters.GetValueOrDefault(i) ?? new List<string>();
+                var letters = diskDriveLetters[i];
                 var matched = logicalDisks
                     .Where(d => letters.Contains(d.Name, StringComparer.OrdinalIgnoreCase))
                     .ToArray();
@@ -202,16 +139,237 @@ internal sealed class DiskMonitor
             var result = physDisks.ToArray();
             _cachedPhysicalDisks = result;
             _physDiskCacheTime = DateTime.UtcNow;
+            SensorLogger.ForceLog($"[DiskMonitor] physical disks result: count={result.Length}, items={string.Join(" | ", result.Select(d => $"{d.Model}:{d.InterfaceType}:parts={d.Partitions.Length}"))}");
             return result;
         }
         catch (Exception ex)
         {
+            SensorLogger.ForceLog($"[DiskMonitor] ReadPhysicalDisks failed: {ex}");
             Debug.WriteLine($"[SysMon] ReadPhysicalDisks: {ex.Message}");
+            var fallback = ReadPhysicalDisksViaPowerShell(logicalDisks);
+            if (fallback.Length > 0)
+            {
+                _cachedPhysicalDisks = fallback;
+                _physDiskCacheTime = DateTime.UtcNow;
+                SensorLogger.ForceLog($"[DiskMonitor] PowerShell fallback result: count={fallback.Length}, items={string.Join(" | ", fallback.Select(d => $"{d.Model}:{d.InterfaceType}:parts={d.Partitions.Length}"))}");
+            }
+            else
+            {
+                SensorLogger.ForceLog("[DiskMonitor] PowerShell fallback returned no disks");
+            }
+
+            return fallback;
+        }
+    }
+
+    private static List<string> GetLogicalDriveLetters(ManagementObject disk)
+    {
+        var driveLetters = new List<string>();
+
+        try
+        {
+            using var partitions = disk.GetRelated("Win32_DiskPartition");
+            foreach (ManagementObject part in partitions)
+            {
+                try
+                {
+                    using var logicalDisks = part.GetRelated("Win32_LogicalDisk");
+                    foreach (ManagementObject logicalDisk in logicalDisks)
+                    {
+                        try
+                        {
+                            var driveLetter = logicalDisk["DeviceID"] as string; // e.g. "C:"
+                            if (!string.IsNullOrEmpty(driveLetter))
+                                driveLetters.Add(driveLetter + "\\");
+                        }
+                        finally { logicalDisk.Dispose(); }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[SysMon] LogicalDisk assoc: {ex.Message}");
+                }
+                finally { part.Dispose(); }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[SysMon] Disk partition assoc: {ex.Message}");
+        }
+
+        return driveLetters;
+    }
+
+    private static PhysicalDiskInfo[] ReadPhysicalDisksViaPowerShell(DiskInfo[] logicalDisks)
+    {
+        const string script = """
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
+function Resolve-BusType($pnp, $iface, $media, $model) {
+    if ($null -eq $pnp) { $pnp = '' }
+    if ($null -eq $iface) { $iface = '' }
+    if ($null -eq $media) { $media = '' }
+    if ($null -eq $model) { $model = '' }
+    $p = $pnp.ToUpperInvariant()
+    $i = $iface.ToUpperInvariant()
+    $m = $media.ToUpperInvariant()
+    $modelUpper = $model.ToUpperInvariant()
+    if ($p.Contains('NVME') -or $modelUpper.Contains('NVME')) { return 'NVMe' }
+    if ($p.StartsWith('USB')) { if ($i -eq 'SCSI') { return 'USB (UASP)' } else { return 'USB' } }
+    if ($p.StartsWith('SCSI') -and $i -eq 'SCSI' -and $m.Contains('EXTERNAL')) { return 'USB (UASP)' }
+    if ($modelUpper.Contains('SSD') -and $i -eq 'SCSI') { return 'SATA' }
+    if ([string]::IsNullOrWhiteSpace($iface)) { return '—' }
+    return $iface
+}
+$rows = foreach ($disk in Get-CimInstance Win32_DiskDrive) {
+    $letters = @()
+    $size = 0
+    if ($null -ne $disk.Size) { $size = [int64]$disk.Size }
+    try {
+        foreach ($part in Get-CimAssociatedInstance -InputObject $disk -ResultClassName Win32_DiskPartition) {
+            foreach ($ld in Get-CimAssociatedInstance -InputObject $part -ResultClassName Win32_LogicalDisk) {
+                if ($ld.DeviceID) { $letters += [string]$ld.DeviceID }
+            }
+        }
+    } catch {}
+    [pscustomobject]@{
+        Model = [string]$disk.Model
+        SerialNumber = [string]$disk.SerialNumber
+        Size = $size
+        InterfaceType = Resolve-BusType $disk.PNPDeviceID $disk.InterfaceType $disk.MediaType $disk.Model
+        DriveLetters = @($letters)
+    }
+}
+$rows | ConvertTo-Json -Compress -Depth 5
+""";
+
+        try
+        {
+            string encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+            var psi = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = $"-NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+            };
+
+            using var p = Process.Start(psi);
+            if (p == null) return [];
+
+            string stdout = p.StandardOutput.ReadToEnd();
+            string stderr = p.StandardError.ReadToEnd();
+            if (!p.WaitForExit(8000))
+            {
+                try { p.Kill(entireProcessTree: true); }
+                catch { }
+                SensorLogger.ForceLog("[DiskMonitor] PowerShell fallback timed out");
+                return [];
+            }
+
+            if (p.ExitCode != 0)
+            {
+                SensorLogger.ForceLog($"[DiskMonitor] PowerShell fallback failed exit={p.ExitCode}: {stderr}");
+                return [];
+            }
+
+            return ParsePhysicalDisksJson(stdout, logicalDisks);
+        }
+        catch (Exception ex)
+        {
+            SensorLogger.ForceLog($"[DiskMonitor] PowerShell fallback exception: {ex}");
             return [];
         }
     }
 
+    private static PhysicalDiskInfo[] ParsePhysicalDisksJson(string json, DiskInfo[] logicalDisks)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return [];
+
+        using var doc = JsonDocument.Parse(json);
+        var rows = doc.RootElement.ValueKind == JsonValueKind.Array
+            ? doc.RootElement.EnumerateArray().ToArray()
+            : [doc.RootElement];
+
+        var result = new List<PhysicalDiskInfo>();
+        foreach (var row in rows)
+        {
+            var letters = ReadDriveLetters(row);
+            var matched = logicalDisks
+                .Where(d => letters.Contains(d.Name.TrimEnd('\\'), StringComparer.OrdinalIgnoreCase))
+                .ToArray();
+
+            double read = 0, write = 0;
+            foreach (var p in matched)
+            {
+                if (p.ReadBytesPerSec > 0) read += p.ReadBytesPerSec;
+                if (p.WriteBytesPerSec > 0) write += p.WriteBytesPerSec;
+            }
+
+            result.Add(new PhysicalDiskInfo
+            {
+                Model = GetJsonString(row, "Model", "Unknown Disk"),
+                SerialNumber = GetJsonString(row, "SerialNumber", ""),
+                TotalBytes = GetJsonInt64(row, "Size"),
+                InterfaceType = GetJsonString(row, "InterfaceType", "—"),
+                Partitions = matched,
+                ReadBytesPerSec = read,
+                WriteBytesPerSec = write,
+            });
+        }
+
+        return result.ToArray();
+    }
+
+    private static HashSet<string> ReadDriveLetters(JsonElement row)
+    {
+        var letters = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!row.TryGetProperty("DriveLetters", out var driveLetters))
+            return letters;
+
+        if (driveLetters.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var letter in driveLetters.EnumerateArray())
+            {
+                var s = letter.GetString();
+                if (!string.IsNullOrWhiteSpace(s)) letters.Add(s);
+            }
+        }
+        else if (driveLetters.ValueKind == JsonValueKind.String)
+        {
+            var s = driveLetters.GetString();
+            if (!string.IsNullOrWhiteSpace(s)) letters.Add(s);
+        }
+
+        return letters;
+    }
+
+    private static string GetJsonString(JsonElement row, string property, string fallback) =>
+        row.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? fallback
+            : fallback;
+
+    private static long GetJsonInt64(JsonElement row, string property) =>
+        row.TryGetProperty(property, out var value) && value.TryGetInt64(out long result)
+            ? result
+            : 0;
+
     /// <summary>P3: 缓存命中时只更新 IO 速度（从最新逻辑磁盘数据汇总）</summary>
+    private static PhysicalDiskInfo[] ClonePhysicalDisks(PhysicalDiskInfo[] disks)
+    {
+        var copy = new PhysicalDiskInfo[disks.Length];
+        for (int i = 0; i < disks.Length; i++)
+        {
+            copy[i] = disks[i];
+            copy[i].Partitions = disks[i].Partitions.ToArray();
+        }
+        return copy;
+    }
+
     private static void UpdatePhysicalDiskIO(PhysicalDiskInfo[] disks, DiskInfo[] logicalDisks)
     {
         for (int i = 0; i < disks.Length; i++)

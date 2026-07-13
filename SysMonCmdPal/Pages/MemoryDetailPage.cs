@@ -1,16 +1,15 @@
 // Copyright (c) 2026 SysMonCmdPal
 // 内存详情页 — FormContent + AdaptiveCards + SVG 图表
 
-using System.Timers;
 using Microsoft.CommandPalette.Extensions;
 using Microsoft.CommandPalette.Extensions.Toolkit;
 
 namespace SysMonCmdPal;
 
-internal sealed partial class MemoryDetailPage : ContentPage
+internal sealed partial class MemoryDetailPage : RefreshingContentPage
 {
     private readonly FormContent _form = new();
-    private bool _subscribed;
+    private readonly CopyTextCommand _copyCommand = new(string.Empty);
 
     private const string Template = """
     {
@@ -144,16 +143,9 @@ internal sealed partial class MemoryDetailPage : ContentPage
         Icon = new IconInfo("");
         Title = Loc.Get("Memory.PageTitle");
         Name = Loc.Get("Dock.Memory");
+        Commands = [new CommandContextItem(_copyCommand) { Title = Loc.Get("Common.CopyCurrentMetrics") }];
         _form.TemplateJson = Template;
         _form.DataJson = """{"memUsagePct":"—","memUsedGB":"—","memFreeGB":"—","memTotalGB":"—","chartUrl":""}""";
-    }
-
-    public void StartTimer()
-    {
-        if (_subscribed) return;
-        _subscribed = true;
-        DockBandRefreshCoordinator.Subscribe(Update);
-        ThreadPool.QueueUserWorkItem(_ => Update());
     }
 
     public override IContent[] GetContent()
@@ -162,7 +154,7 @@ internal sealed partial class MemoryDetailPage : ContentPage
         return [_form];
     }
 
-    private void Update()
+    protected override void RefreshContent()
     {
         try
         {
@@ -183,6 +175,7 @@ internal sealed partial class MemoryDetailPage : ContentPage
                 ["chartUrl"] = chartUrl,
             };
 
+            _copyCommand.Text = $"Memory {usedGB:F1}/{totalGB:F1} GB · {FormatPercentOrNA(info.MemoryUsed)}";
             _form.DataJson = JsonHelper.ToJson(data);
         }
         catch (Exception ex)
@@ -190,4 +183,6 @@ internal sealed partial class MemoryDetailPage : ContentPage
             System.Diagnostics.Debug.WriteLine($"[MemoryDetailPage] Update failed: {ex.Message}");
         }
     }
+
+    private static string FormatPercentOrNA(double value) => value >= 0 ? $"{value:F0}%" : Loc.Get("Common.NA");
 }

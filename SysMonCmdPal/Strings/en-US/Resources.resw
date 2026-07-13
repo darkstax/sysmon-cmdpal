@@ -45,6 +45,9 @@
   <data name="Common.SensorBackendLabel" xml:space="preserve">
     <value>Sensor backend: {0}</value>
   </data>
+  <data name="Common.CopyCurrentMetrics" xml:space="preserve">
+    <value>Copy current metrics</value>
+  </data>
 
   <!-- ==================== Backend status ==================== -->
   <data name="Backend.Broker" xml:space="preserve">
@@ -176,6 +179,18 @@
   <data name="MainPage.SensorSubtitleConnected" xml:space="preserve">
     <value>Broker connected · {0} sensors</value>
   </data>
+  <data name="MainPage.SensorSubtitleNoData" xml:space="preserve">
+    <value>Broker connected · no sensor data yet</value>
+  </data>
+  <data name="MainPage.SensorSubtitleStale" xml:space="preserve">
+    <value>Broker data stale · {0}s since last update</value>
+  </data>
+  <data name="MainPage.SensorSubtitleError" xml:space="preserve">
+    <value>Broker shared memory error · {0}</value>
+  </data>
+  <data name="MainPage.SensorSubtitleUnavailable" xml:space="preserve">
+    <value>Broker shared memory unavailable</value>
+  </data>
   <data name="MainPage.SensorSubtitleDisconnected" xml:space="preserve">
     <value>Requires SysMonBroker running</value>
   </data>
@@ -300,6 +315,15 @@ No battery detected (desktop or virtual machine).</value>
   <data name="Sensor.NoDataAlive" xml:space="preserve">
     <value>Broker connected but no sensor data yet</value>
   </data>
+  <data name="Sensor.NoDataStale" xml:space="preserve">
+    <value>Broker data is stale · {0}s since last update</value>
+  </data>
+  <data name="Sensor.NoDataError" xml:space="preserve">
+    <value>Broker shared memory error: {0}</value>
+  </data>
+  <data name="Sensor.NoDataUnavailable" xml:space="preserve">
+    <value>Broker shared memory unavailable. Start SysMonBroker as administrator.</value>
+  </data>
   <data name="Sensor.NoDataDead" xml:space="preserve">
     <value>Requires SysMonBroker running (administrator privileges)</value>
   </data>
@@ -308,6 +332,12 @@ No battery detected (desktop or virtual machine).</value>
   </data>
   <data name="Sensor.EmptyListDetail" xml:space="preserve">
     <value>LHM detected no available sensors</value>
+  </data>
+  <data name="Sensor.BrowseCount" xml:space="preserve">
+    <value>{0} sensors</value>
+  </data>
+  <data name="Sensor.CategoryEmptyDetail" xml:space="preserve">
+    <value>No matching sensors in {0}</value>
   </data>
   <data name="Sensor.ItemTitle" xml:space="preserve">
     <value>{0}: {1}</value>
@@ -457,5 +487,28 @@ No battery detected (desktop or virtual machine).</value>
   </data>
   <data name="SensorCategory.StorageLoad" xml:space="preserve">
     <value>Storage Load</value>
+  </data>
+
+  <!-- ==================== Sensor browse groups ==================== -->
+  <data name="SensorBrowse.Temperature" xml:space="preserve">
+    <value>Temperature</value>
+  </data>
+  <data name="SensorBrowse.Load" xml:space="preserve">
+    <value>Load / Usage</value>
+  </data>
+  <data name="SensorBrowse.Power" xml:space="preserve">
+    <value>Power</value>
+  </data>
+  <data name="SensorBrowse.Fan" xml:space="preserve">
+    <value>Fan</value>
+  </data>
+  <data name="SensorBrowse.Frequency" xml:space="preserve">
+    <value>Frequency</value>
+  </data>
+  <data name="SensorBrowse.Voltage" xml:space="preserve">
+    <value>Voltage</value>
+  </data>
+  <data name="SensorBrowse.Storage" xml:space="preserve">
+    <value>Storage</value>
   </data>
 </root>

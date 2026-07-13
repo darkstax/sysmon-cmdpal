@@ -10,7 +10,9 @@
 //   Writer: writes all data fields, then MemoryBarrier, then writes counter.
 //   Reader: reads counter first to detect changes, then reads data fields.
 //
-// ACL: D:(A;;GR;;;WD)(A;;GA;;;BA) — Everyone read, Admins full control
+// ACL: D:P(A;;GR;;;BU)(A;;GA;;;BA)(A;;GA;;;SY) — Users read, Admins/System full control
+// SensorEntry.HardwareTag packs hardware type in the low byte and same-type
+// instance index in the upper bits, so multiple GPUs of the same vendor stay distinct.
 
 using System.Runtime.InteropServices;
 using System.Text;
@@ -18,18 +20,18 @@ using System.Threading;
 
 namespace SysMonBroker.IPC;
 
-/// <summary>Generic sensor entry for shared memory</summary>
+/// <summary>Generic sensor entry for shared memory. HardwareTag = type | (instance << 8).</summary>
 public sealed record SensorEntry(int Tag, string Name, double Value, string Unit, int HardwareTag);
 
 public sealed class BrokerSharedMemory : IDisposable
 {
-    public const string MapName = "SysMonBrokerShm";
-    public const string EventName = "SysMonBrokerEvent";
+    public const string MapName = @"Global\SysMonBrokerShm";
+    public const string EventName = @"Global\SysMonBrokerEvent";
     public const int MagicValue = 0x5342524B;
     public const int MapVersion = 2;
     public const int MapSize = 16384;
     public const int MaxGpus = 4;
-    public const int MaxSensors = 128;
+    public const int MaxSensors = 250;
 
     // v2 offsets
     private const int OffMagic = 0;
@@ -59,7 +61,8 @@ public sealed class BrokerSharedMemory : IDisposable
     private const int SensorHwOff = 60;
     private const int SensorEntrySize = 64;
 
-    private const string Sddl = "D:(A;;GR;;;WD)(A;;GA;;;BA)";
+    private const string Sddl = "D:P(A;;GR;;;BU)(A;;GA;;;BA)(A;;GA;;;SY)";
+    private const int ERROR_ALREADY_EXISTS = 183;
 
     private IntPtr _hMap = IntPtr.Zero;
     private IntPtr _pView = IntPtr.Zero;
@@ -69,9 +72,18 @@ public sealed class BrokerSharedMemory : IDisposable
 
     // ---- P/Invoke ----
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SECURITY_ATTRIBUTES
+    {
+        public uint nLength;
+        public IntPtr lpSecurityDescriptor;
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool bInheritHandle;
+    }
+
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern IntPtr CreateFileMapping(IntPtr hFile,
-        IntPtr lpFileMappingAttributes, uint flProtect,
+        ref SECURITY_ATTRIBUTES lpFileMappingAttributes, uint flProtect,
         uint dwMaximumSizeHigh, uint dwMaximumSizeLow, string lpName);
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -110,18 +122,33 @@ public sealed class BrokerSharedMemory : IDisposable
 
     private const uint SE_KERNEL_OBJECT = 6;
     private const uint DACL_SECURITY_INFORMATION = 4;
+    private const uint SECURITY_DESCRIPTOR_REVISION = 1;
+    private static readonly IntPtr InvalidHandleValue = new(-1);
 
     public BrokerSharedMemory()
     {
-        // Create or open the named file mapping (read-write, 16KB).
-        _hMap = CreateFileMapping(new IntPtr(-1), IntPtr.Zero, PAGE_READWRITE,
-            0, MapSize, MapName);
-        if (_hMap == IntPtr.Zero)
-            throw new System.ComponentModel.Win32Exception();
+        IntPtr sd = IntPtr.Zero;
+        bool alreadyExists;
 
         try
         {
-            ApplySecurityDescriptor();
+            var sa = CreateSecurityAttributes(out sd);
+            _hMap = CreateFileMapping(InvalidHandleValue, ref sa, PAGE_READWRITE,
+                0, MapSize, MapName);
+            int lastError = Marshal.GetLastWin32Error();
+            if (_hMap == IntPtr.Zero)
+                throw new System.ComponentModel.Win32Exception(lastError);
+            alreadyExists = lastError == ERROR_ALREADY_EXISTS;
+        }
+        finally
+        {
+            if (sd != IntPtr.Zero) LocalFree(sd);
+        }
+
+        try
+        {
+            if (alreadyExists)
+                ApplySecurityDescriptor(throwOnFailure: true);
 
             _event = new EventWaitHandle(false, EventResetMode.AutoReset, EventName);
 
@@ -130,12 +157,7 @@ public sealed class BrokerSharedMemory : IDisposable
             if (_pView == IntPtr.Zero)
                 throw new System.ComponentModel.Win32Exception();
 
-            unsafe
-            {
-                byte* p = (byte*)_pView;
-                *(int*)(p + OffMagic) = MagicValue;
-                *(int*)(p + OffVersion) = MapVersion;
-            }
+            InitializeHeader();
         }
         catch
         {
@@ -147,21 +169,58 @@ public sealed class BrokerSharedMemory : IDisposable
         }
     }
 
-    private void ApplySecurityDescriptor()
+    private static SECURITY_ATTRIBUTES CreateSecurityAttributes(out IntPtr securityDescriptor)
+    {
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
+            Sddl, SECURITY_DESCRIPTOR_REVISION, out securityDescriptor, IntPtr.Zero))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+
+        return new SECURITY_ATTRIBUTES
+        {
+            nLength = (uint)Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
+            lpSecurityDescriptor = securityDescriptor,
+            bInheritHandle = false,
+        };
+    }
+
+    private unsafe void InitializeHeader()
+    {
+        byte* p = (byte*)_pView;
+        _counter = 0;
+        *(int*)(p + OffMagic) = MagicValue;
+        *(int*)(p + OffVersion) = MapVersion;
+        *(double*)(p + OffCpuTemp) = -1;
+        WriteString(p + OffSource, "None", 32);
+        *(int*)(p + OffGpuCount) = 0;
+        *(long*)(p + OffTimestamp) = DateTime.UtcNow.Ticks;
+        *(int*)(p + OffSensorCount) = 0;
+        Thread.MemoryBarrier();
+        *(int*)(p + OffCounter) = _counter;
+    }
+
+    private void ApplySecurityDescriptor(bool throwOnFailure)
     {
         IntPtr sd = IntPtr.Zero;
         try
         {
             if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
-                Sddl, 1, out sd, IntPtr.Zero))
+                Sddl, SECURITY_DESCRIPTOR_REVISION, out sd, IntPtr.Zero))
+            {
+                if (throwOnFailure) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
                 return;
+            }
 
             if (!GetSecurityDescriptorDacl(sd, out bool daclPresent, out IntPtr dacl, out _))
+            {
+                if (throwOnFailure) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
                 return;
+            }
             if (!daclPresent) return;
 
-            SetSecurityInfo(_hMap, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION,
+            uint result = SetSecurityInfo(_hMap, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION,
                 IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
+            if (result != 0 && throwOnFailure)
+                throw new System.ComponentModel.Win32Exception((int)result);
         }
         finally
         {

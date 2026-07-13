@@ -30,7 +30,9 @@ internal static class GpuSensorReader
         var brokerSnap = BrokerPushReceiver.Instance.Snapshot;
         if (brokerSnap.IsFresh && brokerSnap.Gpus.Count > 0)
         {
-            return brokerSnap.Gpus.Values
+            return brokerSnap.Gpus
+                .OrderBy(kvp => kvp.Key)
+                .Select(kvp => kvp.Value)
                 .Select(g => new GpuResult(g.Name, g.UsagePercent, g.Temperature,
                     g.MemoryUsedMB, g.MemoryTotalMB, "Broker"))
                 .ToList();
@@ -42,7 +44,10 @@ internal static class GpuSensorReader
         {
             try
             {
-                return ReadGpusFromHwinfo(hwinfo);
+                var hwinfoResults = ReadGpusFromHwinfo(hwinfo);
+                if (hwinfoResults.Count > 0)
+                    return hwinfoResults;
+                SensorLogger.ForceLog("GPU HWiNFO 可用但未读到 GPU 数据，继续回退");
             }
             catch (Exception ex)
             {
@@ -132,18 +137,42 @@ internal static class GpuSensorReader
         // 独显显存（GPU Memory Allocated + Available）
         var (dgpuMemUsed, dgpuMemAvail, dgpuMemTotal) = hwinfo.ReadGpuMemoryMB();
 
-        // 独显温度（第 2 个 GPU Temperature）
-        var (dgpuTemp, _) = hwinfo.ReadGpuTemp(1);
+        // HWiNFO 只有温度标签顺序，没有可靠分组。双 GPU 时沿用旧约定：
+        // 第 1 个温度给集显，第 2 个温度给独显；单 GPU 时第 1 个温度给唯一 GPU。
+        var (temp0, _) = hwinfo.ReadGpuTemp(0);
+        var (temp1, _) = hwinfo.ReadGpuTemp(1);
 
-        // 集显温度（第 1 个 GPU Temperature）
-        var (igpuTemp, _) = hwinfo.ReadGpuTemp(0);
+        bool hasDgpuSignals = dgpuMemTotal > 1024 || dgpuLoad >= 0;
+        bool hasIgpuSignals = igpuLoad >= 0;
+        bool dualGpu = hasDgpuSignals && hasIgpuSignals;
 
-        // ---- 独显（排第一）----
-        // 判断标准：有独立显存 或 有 Core Load 使用率
-        bool hasDgpu = dgpuMemTotal > 1024 || dgpuLoad >= 0 || dgpuTemp > 0;
-        if (hasDgpu)
+        double dgpuTemp = -1;
+        double igpuTemp = -1;
+        if (dualGpu)
         {
-            string name = GetGpuNameByRamRank(0); // RAM 最大的 = 独显
+            igpuTemp = temp0 > 0 ? temp0 : -1;
+            dgpuTemp = temp1 > 0 ? temp1 : -1;
+        }
+        else if (hasDgpuSignals)
+        {
+            dgpuTemp = temp0 > 0 ? temp0 : (temp1 > 0 ? temp1 : -1);
+        }
+        else if (hasIgpuSignals)
+        {
+            igpuTemp = temp0 > 0 ? temp0 : -1;
+        }
+        else if (temp0 > 0)
+        {
+            // 只有温度、没有负载/显存信号时，不凭温度制造第二块 GPU。
+            hasDgpuSignals = true;
+            dgpuTemp = temp0;
+        }
+
+        // ---- 独显/唯一 GPU（排第一）----
+        if (hasDgpuSignals || dgpuTemp > 0)
+        {
+            string name = GetGpuNameByRamRank(0); // RAM 最大的 = 独显；单 GPU 时也是唯一 GPU
+            if (string.IsNullOrEmpty(name)) name = "GPU";
             results.Add(new GpuResult(
                 name,
                 dgpuLoad >= 0 ? dgpuLoad : -1,
@@ -153,12 +182,11 @@ internal static class GpuSensorReader
                 "HWiNFO"));
         }
 
-        // ---- 集显（排第二）----
-        // 判断标准：无独立显存，有 Utilization 或温度
-        bool hasIgpu = igpuLoad >= 0 || igpuTemp > 0;
-        if (hasIgpu)
+        // ---- 集显（排第二；单集显时也允许使用 rank 0 名称）----
+        if (hasIgpuSignals || igpuTemp > 0)
         {
-            string name = GetGpuNameByRamRank(1); // RAM 第二大的 = 集显
+            string name = GetGpuNameByRamRank(results.Count > 0 ? 1 : 0);
+            if (string.IsNullOrEmpty(name)) name = "iGPU";
             results.Add(new GpuResult(
                 name,
                 igpuLoad >= 0 ? igpuLoad : -1,

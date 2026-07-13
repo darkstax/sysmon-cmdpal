@@ -3,12 +3,7 @@
 // v2: reads full sensor array in addition to CPU/GPU
 // Runs on a background thread, updates BrokerPushReceiver singleton
 //
-// IMPORTANT: We use P/Invoke (OpenFileMapping + MapViewOfFile) instead of the
-// managed MemoryMappedFile API. The managed API's view objects (both ViewAccessor
-// and ViewStream) caused "The process cannot access the file because it is being
-// used by another process" errors on the Broker writer side, even with Read-only
-// access and immediate disposal. The native API with FILE_MAP_COPY + immediate
-// UnmapViewOfFile avoids this completely.
+// Uses managed MemoryMappedFile API with a persistent read-only view.
 //
 // This does NOT affect antivirus detection — the HWiNFO P/Invoke removal was
 // about the OpenFileMapping→MapViewOfFile data-exfiltration pattern match in
@@ -24,15 +19,15 @@ namespace SysMonCmdPal.Broker;
 
 /// <summary>
 /// Reads sensor data from Broker's shared memory and feeds it to BrokerPushReceiver.
-/// Uses native P/Invoke to avoid managed MemoryMappedFile view locking issues.
+/// Uses managed MemoryMappedFile with persistent handles to avoid reconnect churn.
 /// </summary>
 public sealed class SharedMemoryReader : IDisposable
 {
-    private const string MapName = "SysMonBrokerShm";
+    private const string MapName = @"Global\SysMonBrokerShm";
 
     private const int MagicValue = 0x5342524B;
     private const int MaxGpus = 4;
-    private const int MaxSensors = 128;
+    private const int MaxSensors = 250;
     private const int MapSize = 16384;
 
     // v2 offsets
@@ -75,6 +70,13 @@ public sealed class SharedMemoryReader : IDisposable
     private System.IO.MemoryMappedFiles.MemoryMappedFile? _mmf;
     private System.IO.MemoryMappedFiles.MemoryMappedViewAccessor? _accessor;
     private readonly byte[] _buffer = new byte[MapSize];
+    private static readonly object s_diagnosticsLock = new();
+    private static SharedMemoryReaderDiagnostics s_diagnostics = new();
+
+    public static SharedMemoryReaderDiagnostics Diagnostics
+    {
+        get { lock (s_diagnosticsLock) return s_diagnostics; }
+    }
 
     public SharedMemoryReader()
     {
@@ -113,6 +115,7 @@ public sealed class SharedMemoryReader : IDisposable
                 _mmf?.Dispose();
                 _accessor = null;
                 _mmf = null;
+                UpdateDiagnostics(connected: false, error: ex.Message);
             }
 
             Thread.Sleep(1000);
@@ -123,13 +126,17 @@ public sealed class SharedMemoryReader : IDisposable
     {
         int magic = BitConverter.ToInt32(buf, OffMagic);
         if (magic != MagicValue)
+        {
+            UpdateDiagnostics(connected: true, error: "Invalid shared memory magic");
             return;
+        }
 
         int counter = BitConverter.ToInt32(buf, OffCounter);
         if (counter == _lastCounter)
         {
             // M2: counter 未变 = Broker 没有在写。不发 Ping，让 LastPing 自然过期，
             // IsAlive 才能正确反映 Broker 是否存活。
+            UpdateDiagnostics(connected: true, counter: counter);
             return;
         }
         _lastCounter = counter;
@@ -140,11 +147,9 @@ public sealed class SharedMemoryReader : IDisposable
         double cpuTemp = BitConverter.ToDouble(buf, OffCpuTemp);
         string source = ReadString(buf, OffSource, 32);
 
-        if (cpuTemp > 0)
-            BrokerPushReceiver.Instance.PushCpuTemp(cpuTemp, source);
-
         // Read GPUs
-        int gpuCount = Math.Min(BitConverter.ToInt32(buf, OffGpuCount), MaxGpus);
+        int gpuCount = ClampCount(BitConverter.ToInt32(buf, OffGpuCount), MaxGpus);
+        var gpus = new List<KeyValuePair<int, BrokerGpuSnapshot>>(gpuCount);
         for (int i = 0; i < gpuCount; i++)
         {
             int gpuOff = OffGpuBase + (i * GpuEntrySize);
@@ -154,15 +159,24 @@ public sealed class SharedMemoryReader : IDisposable
             double memUsed = BitConverter.ToDouble(buf, gpuOff + GpuMemUsedOff);
             double memTotal = BitConverter.ToDouble(buf, gpuOff + GpuMemTotalOff);
 
-            BrokerPushReceiver.Instance.PushGpuData(
-                i, name, temp, usage, memUsed, memTotal);
+            gpus.Add(new KeyValuePair<int, BrokerGpuSnapshot>(i, new BrokerGpuSnapshot
+            {
+                Name = name,
+                Temperature = IsReasonableTemp(temp) ? temp : -1,
+                UsagePercent = IsReasonablePercent(usage) ? usage : -1,
+                MemoryUsedMB = IsFiniteNonNegative(memUsed) ? memUsed : 0,
+                MemoryTotalMB = IsFiniteNonNegative(memTotal) ? memTotal : 0,
+                Timestamp = DateTime.UtcNow,
+            }));
         }
+
+        IReadOnlyList<BrokerSensorEntry> sensors = Array.Empty<BrokerSensorEntry>();
 
         // Read generic sensors (v2)
         if (version >= 2)
         {
-            int sensorCount = Math.Min(BitConverter.ToInt32(buf, OffSensorCount), MaxSensors);
-            var sensors = new List<BrokerSensorEntry>(sensorCount);
+            int sensorCount = ClampCount(BitConverter.ToInt32(buf, OffSensorCount), MaxSensors);
+            var list = new List<BrokerSensorEntry>(sensorCount);
 
             for (int i = 0; i < sensorCount; i++)
             {
@@ -173,7 +187,10 @@ public sealed class SharedMemoryReader : IDisposable
                 string unit = ReadString(buf, sOff + SensorUnitOff, 16);
                 int hwTag = BitConverter.ToInt32(buf, sOff + SensorHwOff);
 
-                sensors.Add(new BrokerSensorEntry
+                if (double.IsNaN(value) || double.IsInfinity(value))
+                    continue;
+
+                list.Add(new BrokerSensorEntry
                 {
                     Tag = tag,
                     Name = name,
@@ -183,12 +200,53 @@ public sealed class SharedMemoryReader : IDisposable
                 });
             }
 
-            BrokerPushReceiver.Instance.PushAllSensors(sensors);
+            sensors = list;
         }
 
-        // Heartbeat
-        BrokerPushReceiver.Instance.Ping();
+        UpdateDiagnostics(
+            connected: true,
+            counter: counter,
+            version: version,
+            sensorCount: sensors.Count,
+            error: "");
+        BrokerPushReceiver.Instance.PushSnapshot(cpuTemp, source, gpus, sensors);
     }
+
+    private static void UpdateDiagnostics(
+        bool connected,
+        int? counter = null,
+        int? version = null,
+        int? sensorCount = null,
+        string? error = null)
+    {
+        lock (s_diagnosticsLock)
+        {
+            s_diagnostics = s_diagnostics with
+            {
+                IsConnected = connected,
+                LastReadUtc = DateTime.UtcNow,
+                LastCounter = counter ?? s_diagnostics.LastCounter,
+                LastVersion = version ?? s_diagnostics.LastVersion,
+                LastSensorCount = sensorCount ?? s_diagnostics.LastSensorCount,
+                LastError = error ?? s_diagnostics.LastError,
+            };
+        }
+    }
+
+    private static int ClampCount(int raw, int max)
+    {
+        if (raw <= 0) return 0;
+        return raw > max ? max : raw;
+    }
+
+    private static bool IsFiniteNonNegative(double value) =>
+        !double.IsNaN(value) && !double.IsInfinity(value) && value >= 0;
+
+    private static bool IsReasonablePercent(double value) =>
+        !double.IsNaN(value) && !double.IsInfinity(value) && value >= 0 && value <= 100;
+
+    private static bool IsReasonableTemp(double value) =>
+        !double.IsNaN(value) && !double.IsInfinity(value) && value > 0 && value < 150;
 
     private static string ReadString(byte[] buf, int offset, int maxBytes)
     {
@@ -208,4 +266,14 @@ public sealed class SharedMemoryReader : IDisposable
         _accessor?.Dispose();
         _mmf?.Dispose();
     }
+}
+
+public sealed record SharedMemoryReaderDiagnostics
+{
+    public bool IsConnected { get; init; }
+    public DateTime LastReadUtc { get; init; } = DateTime.MinValue;
+    public int LastCounter { get; init; }
+    public int LastVersion { get; init; }
+    public int LastSensorCount { get; init; }
+    public string LastError { get; init; } = "";
 }

@@ -59,8 +59,8 @@ internal sealed partial class SysMonMainPage : ListPage
             },
             new ListItem(_diskPage)
             {
-                Title = Loc.Format("MainPage.DiskTitle", info.Disks.Length),
-                Subtitle = string.Join(" · ", info.Disks.Select(d => $"{d.Name} {d.UsedPercent:F0}%")),
+                Title = Loc.Format("MainPage.DiskTitle", GetDiskCount(info)),
+                Subtitle = GetDiskSubtitle(info),
                 Icon = new IconInfo(""),
             },
             new ListItem(_netPage)
@@ -119,8 +119,45 @@ internal sealed partial class SysMonMainPage : ListPage
     private static string GetSensorSubtitle()
     {
         var snap = BrokerPushReceiver.Instance.Snapshot;
-        return snap.IsAlive && snap.IsFresh
-            ? Loc.Format("MainPage.SensorSubtitleConnected", snap.AllSensors.Count)
-            : Loc.Get("MainPage.SensorSubtitleDisconnected");
+        var diag = SharedMemoryReader.Diagnostics;
+
+        if (snap.IsAlive && snap.IsFresh)
+        {
+            return snap.AllSensors.Count > 0
+                ? Loc.Format("MainPage.SensorSubtitleConnected", snap.AllSensors.Count)
+                : Loc.Get("MainPage.SensorSubtitleNoData");
+        }
+
+        if (diag.IsConnected && snap.LastPush != DateTime.MinValue)
+        {
+            int seconds = Math.Max(0, (int)(DateTime.UtcNow - snap.LastPush).TotalSeconds);
+            return Loc.Format("MainPage.SensorSubtitleStale", seconds);
+        }
+
+        if (!string.IsNullOrWhiteSpace(diag.LastError))
+            return Loc.Format("MainPage.SensorSubtitleError", diag.LastError);
+
+        return Loc.Get("MainPage.SensorSubtitleUnavailable");
+    }
+
+    private static int GetDiskCount(SystemSnapshot info) =>
+        info.PhysicalDisks is { Length: > 0 } ? info.PhysicalDisks.Length : info.Disks.Length;
+
+    private static string GetDiskSubtitle(SystemSnapshot info)
+    {
+        if (info.PhysicalDisks is { Length: > 0 })
+        {
+            return string.Join(" · ", info.PhysicalDisks.Select(d =>
+            {
+                string protocol = string.IsNullOrWhiteSpace(d.InterfaceType) ? "—" : d.InterfaceType;
+                var partitions = d.Partitions ?? [];
+                long partTotal = partitions.Sum(p => p.TotalBytes);
+                long partUsed = partitions.Sum(p => p.TotalBytes - p.FreeBytes);
+                double usedPct = partTotal > 0 ? partUsed * 100.0 / partTotal : 0;
+                return $"{protocol} {usedPct:F0}%";
+            }));
+        }
+
+        return string.Join(" · ", info.Disks.Select(d => $"{d.Name} {d.UsedPercent:F0}%"));
     }
 }

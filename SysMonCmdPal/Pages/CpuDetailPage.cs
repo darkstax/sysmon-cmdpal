@@ -2,16 +2,15 @@
 // CPU 详情页 — FormContent + AdaptiveCards + SVG 图表
 // 模板只解析一次，DataJson INPC 更新只刷新数据
 
-using System.Timers;
 using Microsoft.CommandPalette.Extensions;
 using Microsoft.CommandPalette.Extensions.Toolkit;
 
 namespace SysMonCmdPal;
 
-internal sealed partial class CpuDetailPage : ContentPage
+internal sealed partial class CpuDetailPage : RefreshingContentPage
 {
     private readonly FormContent _form = new();
-    private bool _subscribed;
+    private readonly CopyTextCommand _copyCommand = new(string.Empty);
 
     private const string Template = """
     {
@@ -178,17 +177,10 @@ internal sealed partial class CpuDetailPage : ContentPage
         Icon = new IconInfo("");
         Title = Loc.Get("Cpu.PageTitle");
         Name = "CPU";
+        Commands = [new CommandContextItem(_copyCommand) { Title = Loc.Get("Common.CopyCurrentMetrics") }];
         _form.TemplateJson = Template;
         // Initial placeholder data so FormContent has valid DataJson before first Update
         _form.DataJson = """{"cpuName":"—","cpuUsage":"—","cpuCores":"—","cpuTemp":"—","backend":"—","chartUrl":"","cpuFreq":"—"}""";
-    }
-
-    public void StartTimer()
-    {
-        if (_subscribed) return;
-        _subscribed = true;
-        DockBandRefreshCoordinator.Subscribe(Update);
-        ThreadPool.QueueUserWorkItem(_ => Update());
     }
 
     public override IContent[] GetContent()
@@ -197,7 +189,7 @@ internal sealed partial class CpuDetailPage : ContentPage
         return [_form];
     }
 
-    private void Update()
+    protected override void RefreshContent()
     {
         try
         {
@@ -221,12 +213,18 @@ internal sealed partial class CpuDetailPage : ContentPage
                     : "—",
             };
 
+            _copyCommand.Text = BuildCopyText(info);
             _form.DataJson = JsonHelper.ToJson(data);
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[CpuDetailPage] Update failed: {ex.Message}");
         }
+    }
+
+    private static string BuildCopyText(SystemSnapshot info)
+    {
+        return $"CPU {FormatPercentOrNA(info.CpuUsage)} · {FormatTempOrNA(info.CpuTemperature)} · {FormatFrequencyOrNA(info.CpuFrequency)} · {BackendCopyLabel(info.Backend)}";
     }
 
     private static string BackendLabel(SensorBackend b) => b switch
@@ -237,4 +235,19 @@ internal sealed partial class CpuDetailPage : ContentPage
         SensorBackend.None => Loc.Get("Backend.NoneFail"),
         _ => Loc.Get("Backend.Unknown"),
     };
+
+    private static string BackendCopyLabel(SensorBackend b) => b switch
+    {
+        SensorBackend.Broker => "Broker",
+        SensorBackend.HWiNFO => "HWiNFO",
+        SensorBackend.ThermalZone => "ACPI",
+        SensorBackend.None => Loc.Get("Common.NA"),
+        _ => Loc.Get("Common.NA"),
+    };
+
+    private static string FormatPercentOrNA(double value) => value >= 0 ? $"{value:F0}%" : Loc.Get("Common.NA");
+
+    private static string FormatTempOrNA(double value) => value >= 0 ? $"{value:F0}°C" : Loc.Get("Common.NA");
+
+    private static string FormatFrequencyOrNA(double value) => value >= 0 ? $"{value:F0} MHz" : Loc.Get("Common.NA");
 }

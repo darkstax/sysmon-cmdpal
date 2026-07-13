@@ -13,6 +13,31 @@ namespace SysMonCmdPal;
 /// </summary>
 internal sealed class NetworkMonitor
 {
+    private static readonly string[] ExcludedDescriptionTokens =
+    [
+        "Hyper-V",
+        "vEthernet",
+        "WSL",
+        "Virtual",
+        "Loopback",
+        "Teredo",
+        "ISATAP",
+        "Bluetooth",
+        "Wi-Fi Direct",
+        "Wintun",
+        "Meta",
+        "TAP-Windows",
+        "Tunnel",
+    ];
+
+    private static readonly string[] ExcludedNameTokens =
+    [
+        "Bluetooth",
+        "-WFP",
+        "-Native WiFi Filter",
+        "-QoS Packet Scheduler",
+    ];
+
     private sealed class NetInterfaceState
     {
         public long PrevBytesDown;
@@ -34,6 +59,8 @@ internal sealed class NetworkMonitor
     private static readonly string _netLogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "SysMonCmdPal", "net_debug.log");
+
+    private static readonly bool _netLogEnabled = IsNetLogEnabled();
 
     /// <summary>首次/重置时：枚举所有物理接口，记录基线字节数</summary>
     public void Seed()
@@ -76,38 +103,12 @@ internal sealed class NetworkMonitor
         var result = new List<NetworkInterface>();
         foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
         {
-            if (ni.OperationalStatus != OperationalStatus.Up)
-                continue;
-            if (ni.NetworkInterfaceType is not
-                (NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211))
-                continue;
-
-            var desc = ni.Description ?? "";
-            var name = ni.Name ?? "";
-
-            // 排除虚拟/隧道/蓝牙/软件接口
-            if (desc.Contains("Hyper-V") || desc.Contains("vEthernet") ||
-                desc.Contains("WSL") || desc.Contains("Virtual") ||
-                desc.Contains("Loopback") || desc.Contains("Teredo") ||
-                desc.Contains("ISATAP") ||
-                desc.Contains("Bluetooth") ||          // 蓝牙 PAN
-                desc.Contains("Wi-Fi Direct") ||        // WiFi 直连虚拟适配器
-                desc.Contains("Wintun") ||              // VPN 隧道驱动
-                desc.Contains("Meta") ||                // Meta 隧道
-                desc.Contains("TAP-Windows") ||         // OpenVPN TAP
-                desc.Contains("Tunnel") ||              // 各种隧道
-                name.Contains("Bluetooth"))             // 蓝牙（名称匹配兜底）
-                continue;
-
-            // 排除 Windows filter driver 绑定（同一物理网卡的多个虚拟层）
-            // 这些绑定会重复上报相同的流量计数器，导致速度被多次累加
-            if (name.Contains("-WFP") ||
-                name.Contains("-Native WiFi Filter") ||
-                name.Contains("-QoS Packet Scheduler"))
-                continue;
-
-            // 只保留有真实硬件的接口（有非零 Speed）
-            if (ni.Speed <= 0)
+            if (!IsPhysicalInterfaceCandidate(
+                ni.OperationalStatus,
+                ni.NetworkInterfaceType,
+                ni.Description,
+                ni.Name,
+                ni.Speed))
                 continue;
 
             result.Add(ni);
@@ -118,6 +119,31 @@ internal sealed class NetworkMonitor
             _interfaceCacheTime = DateTime.UtcNow;
         }
         return result;
+    }
+
+    internal static bool IsPhysicalInterfaceCandidate(
+        OperationalStatus status,
+        NetworkInterfaceType type,
+        string? description,
+        string? name,
+        long speed)
+    {
+        if (status != OperationalStatus.Up)
+            return false;
+        if (type is not (NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211))
+            return false;
+        if (speed <= 0)
+            return false;
+
+        var desc = description ?? "";
+        var ifaceName = name ?? "";
+
+        if (ContainsAny(desc, ExcludedDescriptionTokens))
+            return false;
+        if (ContainsAny(ifaceName, ExcludedNameTokens))
+            return false;
+
+        return true;
     }
 
     /// <summary>按接口独立计算速度，EMA 平滑，异常值过滤</summary>
@@ -136,7 +162,7 @@ internal sealed class NetworkMonitor
             bool interfaceSetChanged = false;
 
             const int NetLogLimit = 60;
-            bool doLog = _netLogCount < NetLogLimit;
+            bool doLog = _netLogEnabled && _netLogCount < NetLogLimit;
 
             if (doLog)
             {
@@ -248,5 +274,30 @@ internal sealed class NetworkMonitor
                 $"[{DateTime.Now:HH:mm:ss.fff}] {msg}\n");
         }
         catch { /* ignore */ }
+    }
+
+    private static bool IsNetLogEnabled()
+    {
+#if DEBUG
+        return true;
+#else
+        var value = Environment.GetEnvironmentVariable("SYSMONCMDPAL_ENABLE_NET_LOG");
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        return value.Equals("1", StringComparison.OrdinalIgnoreCase) ||
+               value.Equals("true", StringComparison.OrdinalIgnoreCase);
+#endif
+    }
+
+    private static bool ContainsAny(string value, string[] tokens)
+    {
+        foreach (var token in tokens)
+        {
+            if (value.Contains(token, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 }

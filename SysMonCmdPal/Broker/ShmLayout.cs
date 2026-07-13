@@ -2,14 +2,16 @@
 // 此文件在 Broker 和 Plugin 之间共享（手动同步）
 // 修改时必须同时更新两端！
 
+using System.Collections.Generic;
+
 namespace SysMonCmdPal.Broker;
 
 /// <summary>共享内存布局常量和传感器分类标签</summary>
 internal static class ShmLayout
 {
     // ---- Map names ----
-    public const string MapName = "SysMonBrokerShm";
-    public const string EventName = "SysMonBrokerEvent";
+    public const string MapName = @"Global\SysMonBrokerShm";
+    public const string EventName = @"Global\SysMonBrokerEvent";
 
     // ---- Magic & Version ----
     public const int MagicValue = 0x5342524B; // "SBRK"
@@ -18,7 +20,7 @@ internal static class ShmLayout
     // ---- Map sizing ----
     public const int MapSize = 16384;         // 16KB (was 4096 in v1)
     public const int MaxGpus = 4;
-    public const int MaxSensors = 128;
+    public const int MaxSensors = 250;
 
     // ---- v1 offsets (backward compatible) ----
     public const int OffMagic = 0;            // int32
@@ -34,7 +36,7 @@ internal static class ShmLayout
     // ---- v2: Generic sensor array ----
     public const int OffSensorCount = 360;    // int32
     public const int OffSensorBase = 364;     // SensorEntry[MaxSensors], 64 bytes each
-    // Sensor area ends at 364 + 128*64 = 8556
+    // Sensor area ends at 364 + 250*64 = 16364
 
     // ---- GPU entry layout (72 bytes each) ----
     public const int GpuNameLen = 32;         // char[32] UTF-8
@@ -49,7 +51,7 @@ internal static class ShmLayout
     public const int SensorNameOff = 4;       // char[32] UTF-8
     public const int SensorValueOff = 36;     // double
     public const int SensorUnitOff = 44;      // char[16] UTF-8
-    public const int SensorHardwareOff = 60;  // int32: hardware type tag
+    public const int SensorHardwareOff = 60;  // int32: type | (same-type instance << 8)
     public const int SensorEntrySize = 64;
 
     // ---- Sensor category tags (matches original SensorCategory enum) ----
@@ -78,6 +80,31 @@ internal static class ShmLayout
     public const int HwGpuIntel = 3;
     public const int HwMotherboard = 4;
     public const int HwStorage = 5;
+
+    // ---- Sensor browse categories ----
+    public const int BrowseCategoryTemperature = 0;
+    public const int BrowseCategoryLoad = 1;
+    public const int BrowseCategoryPower = 2;
+    public const int BrowseCategoryFan = 3;
+    public const int BrowseCategoryFrequency = 4;
+    public const int BrowseCategoryVoltage = 5;
+    public const int BrowseCategoryStorage = 6;
+
+    public static IReadOnlyList<int> BrowseCategories { get; } =
+    [
+        BrowseCategoryTemperature,
+        BrowseCategoryLoad,
+        BrowseCategoryPower,
+        BrowseCategoryFan,
+        BrowseCategoryFrequency,
+        BrowseCategoryVoltage,
+        BrowseCategoryStorage,
+    ];
+
+    public static int HardwareTypeFromTag(int packedHardwareTag) => packedHardwareTag & 0xFF;
+
+    public static int HardwareInstanceFromTag(int packedHardwareTag) =>
+        (packedHardwareTag >> 8) & 0xFFFF;
 
     /// <summary>将硬件类型字符串转为 tag</summary>
     public static int HardwareTag(string hwType) => hwType switch
@@ -167,5 +194,41 @@ internal static class ShmLayout
         TagGpuMemory => "MB",
         TagGpuFan or TagMbFan => "RPM",
         _ => "",
+    };
+
+    public static string BrowseCategoryName(int category) => category switch
+    {
+        BrowseCategoryTemperature => Loc.Get("SensorBrowse.Temperature"),
+        BrowseCategoryLoad => Loc.Get("SensorBrowse.Load"),
+        BrowseCategoryPower => Loc.Get("SensorBrowse.Power"),
+        BrowseCategoryFan => Loc.Get("SensorBrowse.Fan"),
+        BrowseCategoryFrequency => Loc.Get("SensorBrowse.Frequency"),
+        BrowseCategoryVoltage => Loc.Get("SensorBrowse.Voltage"),
+        BrowseCategoryStorage => Loc.Get("SensorBrowse.Storage"),
+        _ => Loc.Get("Common.Unknown"),
+    };
+
+    public static int BrowseCategoryRepresentativeTag(int category) => category switch
+    {
+        BrowseCategoryTemperature => TagCpuTemp,
+        BrowseCategoryLoad => TagCpuLoad,
+        BrowseCategoryPower => TagCpuPower,
+        BrowseCategoryFan => TagGpuFan,
+        BrowseCategoryFrequency => TagCpuClock,
+        BrowseCategoryVoltage => TagCpuVoltage,
+        BrowseCategoryStorage => TagStorageTemp,
+        _ => -1,
+    };
+
+    public static bool BrowseCategoryMatchesTag(int category, int tag) => category switch
+    {
+        BrowseCategoryTemperature => tag is TagCpuTemp or TagGpuTemp or TagMbTemp,
+        BrowseCategoryLoad => tag is TagCpuLoad or TagGpuLoad,
+        BrowseCategoryPower => tag is TagCpuPower or TagGpuPower,
+        BrowseCategoryFan => tag is TagGpuFan or TagMbFan,
+        BrowseCategoryFrequency => tag is TagCpuClock or TagGpuClock,
+        BrowseCategoryVoltage => tag is TagCpuVoltage or TagGpuVoltage or TagMbVoltage,
+        BrowseCategoryStorage => tag is TagGpuMemory or TagStorageTemp or TagStorageLoad,
+        _ => false,
     };
 }

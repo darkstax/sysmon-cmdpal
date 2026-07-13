@@ -12,49 +12,48 @@ public class SystemInfoServiceTests
     // GetPhysicalInterfacesStatic — 网络接口过滤
     // ================================================================
 
-    [Fact]
-    public void GetPhysicalInterfaces_ExcludesVirtual_AllResultsArePhysical()
+    [Theory]
+    [InlineData(NetworkInterfaceType.Ethernet, "hyper-v virtual ethernet adapter", "Ethernet", false)]
+    [InlineData(NetworkInterfaceType.Wireless80211, "intel wi-fi 7", "bluetooth network connection", false)]
+    [InlineData(NetworkInterfaceType.Ethernet, "intel ethernet controller", "ethernet 2-qos packet scheduler", false)]
+    [InlineData(NetworkInterfaceType.Ethernet, "openvpn tap-windows adapter", "Ethernet", false)]
+    [InlineData(NetworkInterfaceType.Ethernet, "realtek usb gbe family controller", "Ethernet", true)]
+    [InlineData(NetworkInterfaceType.Wireless80211, "intel wi-fi 7 be200", "Wi-Fi", true)]
+    public void IsPhysicalInterfaceCandidate_FiltersDescriptionsAndNamesCaseInsensitively(
+        NetworkInterfaceType type,
+        string description,
+        string name,
+        bool expected)
     {
-        var interfaces = NetworkMonitor.GetPhysicalInterfaces();
+        var result = NetworkMonitor.IsPhysicalInterfaceCandidate(
+            OperationalStatus.Up,
+            type,
+            description,
+            name,
+            speed: 1_000_000_000);
 
-        foreach (var ni in interfaces)
-        {
-            Assert.True(
-                ni.NetworkInterfaceType == NetworkInterfaceType.Ethernet ||
-                ni.NetworkInterfaceType == NetworkInterfaceType.Wireless80211,
-                $"接口 {ni.Name} ({ni.Description}) 类型是 {ni.NetworkInterfaceType}，" +
-                "应为 Ethernet 或 Wireless80211");
-
-            var desc = ni.Description ?? "";
-            Assert.DoesNotContain("Hyper-V", desc);
-            Assert.DoesNotContain("vEthernet", desc);
-            Assert.DoesNotContain("WSL", desc);
-            Assert.DoesNotContain("Virtual", desc);
-            Assert.DoesNotContain("Loopback", desc);
-            Assert.DoesNotContain("Teredo", desc);
-            Assert.DoesNotContain("ISATAP", desc);
-            Assert.DoesNotContain("Bluetooth", desc);
-            Assert.DoesNotContain("Wintun", desc);
-            Assert.DoesNotContain("Tunnel", desc);
-
-            var name = ni.Name ?? "";
-            Assert.DoesNotContain("Bluetooth", name);
-            Assert.DoesNotContain("-WFP", name);
-            Assert.DoesNotContain("-Native WiFi Filter", name);
-            Assert.DoesNotContain("-QoS Packet Scheduler", name);
-
-            Assert.True(ni.Speed > 0, $"接口 {ni.Name} 的 Speed 应为正数");
-            Assert.Equal(OperationalStatus.Up, ni.OperationalStatus);
-        }
+        Assert.Equal(expected, result);
     }
 
-    [Fact]
-    public void GetPhysicalInterfaces_ReturnsNoDuplicates()
+    [Theory]
+    [InlineData(OperationalStatus.Down, NetworkInterfaceType.Ethernet, 1_000_000_000, false)]
+    [InlineData(OperationalStatus.Up, NetworkInterfaceType.Loopback, 1_000_000_000, false)]
+    [InlineData(OperationalStatus.Up, NetworkInterfaceType.Wireless80211, 0, false)]
+    [InlineData(OperationalStatus.Up, NetworkInterfaceType.Wireless80211, 1_000_000_000, true)]
+    public void IsPhysicalInterfaceCandidate_RequiresUpPhysicalInterfaceAndPositiveSpeed(
+        OperationalStatus status,
+        NetworkInterfaceType type,
+        long speed,
+        bool expected)
     {
-        var interfaces = NetworkMonitor.GetPhysicalInterfaces();
-        var ids = interfaces.Select(ni => ni.Id).ToList();
+        var result = NetworkMonitor.IsPhysicalInterfaceCandidate(
+            status,
+            type,
+            description: "Intel Ethernet Controller",
+            name: "Wi-Fi",
+            speed);
 
-        Assert.Equal(ids.Distinct().Count(), ids.Count);
+        Assert.Equal(expected, result);
     }
 
     // ================================================================
@@ -111,6 +110,31 @@ public class SystemInfoServiceTests
         Assert.Equal(0, s.CpuTemperature);
         // enum default ctor = 0 = Broker (first value)
         Assert.Equal(SensorBackend.Broker, s.Backend);
+    }
+
+    [Theory]
+    [InlineData(8, true)]      // charging
+    [InlineData(10, true)]     // low + charging
+    [InlineData(12, true)]     // critical + charging
+    [InlineData(128, false)]   // no system battery
+    [InlineData(255, false)]   // unknown
+    public void HasSystemBattery_TreatsBatteryFlagAsBitMask(int flag, bool expected)
+    {
+        Assert.Equal(expected, SystemInfoService.HasSystemBattery(flag));
+    }
+
+    [Fact]
+    public void ParseWifiSsid_IgnoresBssidAndReturnsSsid()
+    {
+        var output = "    BSSID : 11:22:33:44:55:66\n    SSID : MyNetwork\n";
+
+        Assert.Equal("MyNetwork", SystemInfoService.ParseWifiSsid(output));
+    }
+
+    [Fact]
+    public void ParseWifiSsid_EmptyOutput_ReturnsEmpty()
+    {
+        Assert.Equal("", SystemInfoService.ParseWifiSsid(""));
     }
 
     // ================================================================

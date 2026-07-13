@@ -3,6 +3,7 @@
 
 using System.Diagnostics;
 using System.IO;
+using System.Text.Json;
 using Microsoft.CommandPalette.Extensions;
 using Microsoft.CommandPalette.Extensions.Toolkit;
 
@@ -13,8 +14,7 @@ internal sealed partial class BtopLauncherCommand : InvokableCommand
     // 候选可执行文件名（scoop 包名可能是 btop 或 btop4win）
     private static readonly string[] ExeNames = ["btop.exe", "btop4win.exe"];
 
-    // 硬编码的常见安装路径（作为最后兜底）
-    private static readonly string[] KnownPaths = [
+    private static readonly string[] ScoopPaths = [
         // scoop: btop-lhm (实际包名)
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "scoop", "apps", "btop-lhm", "current", "btop.exe"),
         // scoop: btop4win (可能的包名)
@@ -22,6 +22,10 @@ internal sealed partial class BtopLauncherCommand : InvokableCommand
         // scoop shims
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "scoop", "shims", "btop.exe"),
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "scoop", "shims", "btop4win.exe"),
+    ];
+
+    // 硬编码的常见安装路径（作为最后兜底）
+    private static readonly string[] ProgramFilesPaths = [
         @"C:\Program Files\btop4win\btop4win.exe",
         @"C:\Program Files\btop4win\btop.exe",
     ];
@@ -75,13 +79,18 @@ internal sealed partial class BtopLauncherCommand : InvokableCommand
 
     private static string? FindBtopExe()
     {
-        // 1. 检查硬编码路径
-        foreach (var path in KnownPaths)
+        foreach (var path in GetConfiguredBtopCandidates())
+        {
+            if (IsExistingBtopExe(path)) return path;
+        }
+
+        // 2. 检查 scoop 常见路径
+        foreach (var path in ScoopPaths)
         {
             if (File.Exists(path)) return path;
         }
 
-        // 2. 搜索 PATH 环境变量
+        // 3. 搜索 PATH 环境变量
         var pathDirs = Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator) ?? [];
         foreach (var dir in pathDirs)
         {
@@ -92,7 +101,69 @@ internal sealed partial class BtopLauncherCommand : InvokableCommand
             }
         }
 
+        // 4. 检查 Program Files 常见路径
+        foreach (var path in ProgramFilesPaths)
+        {
+            if (File.Exists(path)) return path;
+        }
+
         return null;
+    }
+
+    private static IEnumerable<string> GetConfiguredBtopCandidates()
+    {
+        var settingsPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "SysMonCmdPal",
+            "settings.json");
+
+        if (!File.Exists(settingsPath))
+            return [];
+
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(settingsPath));
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return [];
+
+            var candidates = new List<string>();
+            foreach (var propertyName in new[] { "btopPath", "btopExePath", "customBtopPath", "btopCustomPath" })
+            {
+                if (!doc.RootElement.TryGetProperty(propertyName, out var property) || property.ValueKind != JsonValueKind.String)
+                    continue;
+
+                var rawPath = property.GetString();
+                if (string.IsNullOrWhiteSpace(rawPath))
+                    continue;
+
+                var candidate = rawPath.Trim();
+                if (Path.EndsInDirectorySeparator(candidate) || Directory.Exists(candidate))
+                {
+                    foreach (var exeName in ExeNames)
+                        candidates.Add(Path.Combine(candidate, exeName));
+                }
+                else
+                {
+                    candidates.Add(candidate);
+                }
+            }
+
+            return candidates;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[BtopLauncherCommand] Failed to parse settings.json: {ex.Message}");
+            return [];
+        }
+    }
+
+    private static bool IsExistingBtopExe(string path)
+    {
+        if (!File.Exists(path))
+            return false;
+
+        var fileName = Path.GetFileName(path);
+        return ExeNames.Any(name => string.Equals(name, fileName, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string? FindWindowsTerminal()

@@ -15,10 +15,15 @@
     <GenerateAppxPackageOnBuild Condition="$([MSBuild]::IsOSPlatform('Windows'))">true</GenerateAppxPackageOnBuild>
     <AppxPackage Condition="!$([MSBuild]::IsOSPlatform('Windows'))">false</AppxPackage>
     <EnableDefaultWindowsAppSdkContentItems Condition="!$([MSBuild]::IsOSPlatform('Windows'))">false</EnableDefaultWindowsAppSdkContentItems>
+    <EnableDefaultWindowsAppSdkPRIResourceItems Condition="!$([MSBuild]::IsOSPlatform('Windows'))">false</EnableDefaultWindowsAppSdkPRIResourceItems>
+    <AppxGeneratePriEnabled Condition="!$([MSBuild]::IsOSPlatform('Windows'))">false</AppxGeneratePriEnabled>
+    <AppxGeneratePrisForPortableLibrariesEnabled Condition="!$([MSBuild]::IsOSPlatform('Windows'))">false</AppxGeneratePrisForPortableLibrariesEnabled>
+    <AppxGetPackagePropertiesEnabled Condition="!$([MSBuild]::IsOSPlatform('Windows'))">false</AppxGetPackagePropertiesEnabled>
+    <IncludeProjectPriFile Condition="!$([MSBuild]::IsOSPlatform('Windows'))">false</IncludeProjectPriFile>
 
     <PackageCertificateKeyFile>SysPulse_TemporaryKey.pfx</PackageCertificateKeyFile>
     <PackageCertificateThumbprint>740708ED2D4E9772D7A45EBE481F80C1CC325790</PackageCertificateThumbprint>
-    <PackageCertificatePassword>SysPulse</PackageCertificatePassword>
+    <PackageCertificatePassword Condition="'$(PackageCertificatePassword)' == ''">$(SysPulsePackageCertificatePassword)</PackageCertificatePassword>
     <PublishProfile>win-$(Platform).pubxml</PublishProfile>
 
     <ImplicitUsings>enable</ImplicitUsings>
@@ -50,7 +55,6 @@
     </PackageReference>
     <PackageReference Include="System.Diagnostics.PerformanceCounter" />
     <PackageReference Include="System.Management" VersionOverride="9.0.0" />
-    <PackageReference Include="System.Text.Json" />
   </ItemGroup>
 
   <!-- CmdPal AppExtension metadata -->

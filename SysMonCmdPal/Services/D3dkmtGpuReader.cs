@@ -80,15 +80,13 @@ internal sealed class D3dkmtGpuReader : IDisposable
                     Name = a.Name,
                 };
 
-                // 探测 node 数量
+                // 探测 node 数量。空闲 GPU 的 RunningTime 可能为 0，
+                // 因此以 QueryStatistics 成功与否判断 node 是否存在。
                 for (int n = 0; n < MaxNodes; n++)
                 {
                     var stat = MakeQuery(stat: default, state.Luid, n);
                     if (D3DKMTQueryStatistics(ref stat) == 0)
-                    {
-                        ulong rt = BitConverter.ToUInt64(stat.QueryResult, 0);
-                        if (rt > 0) state.NodeCount = n + 1;
-                    }
+                        state.NodeCount = n + 1;
                     else break;
                 }
                 if (state.NodeCount > 0)
@@ -119,15 +117,20 @@ internal sealed class D3dkmtGpuReader : IDisposable
             {
                 // 采样当前 RunningTime
                 var current = new ulong[state.NodeCount];
+                var valid = new bool[state.NodeCount];
                 for (int n = 0; n < state.NodeCount; n++)
                 {
                     var stat = MakeQuery(default, state.Luid, n);
                     if (D3DKMTQueryStatistics(ref stat) == 0)
+                    {
                         current[n] = BitConverter.ToUInt64(stat.QueryResult, 0);
+                        valid[n] = true;
+                    }
                 }
                 long nowTicks = Stopwatch.GetTimestamp();
 
                 double usage = -1;
+                bool resetBaseline = false;
                 if (state.HasPrevious)
                 {
                     double wallMs = (nowTicks - state.PrevTimestamp) * 1000.0 / Stopwatch.Frequency;
@@ -135,11 +138,17 @@ internal sealed class D3dkmtGpuReader : IDisposable
                     double maxUtil = 0;
                     for (int n = 0; n < state.NodeCount; n++)
                     {
+                        if (!valid[n]) continue;
+                        if (current[n] < state.PrevRunningTimes[n])
+                        {
+                            resetBaseline = true;
+                            continue;
+                        }
                         double busyMs = (double)(current[n] - state.PrevRunningTimes[n]) / 10000.0;
                         double util = wallMs > 0 ? busyMs / wallMs * 100.0 : 0;
                         if (util > maxUtil) maxUtil = util;
                     }
-                    usage = Math.Min(maxUtil, 100);
+                    usage = resetBaseline ? -1 : Math.Min(maxUtil, 100);
                 }
 
                 // 保存当前采样供下次 delta 计算

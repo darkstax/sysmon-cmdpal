@@ -37,8 +37,8 @@ public sealed class BrokerSensorSnapshot
     public string CpuSource { get; init; } = "";
     public ConcurrentDictionary<int, BrokerGpuSnapshot> Gpus { get; init; } = new();
     public IReadOnlyList<BrokerSensorEntry> AllSensors { get; init; } = [];
-    public DateTime LastPush { get; init; } = DateTime.UtcNow;
-    public DateTime LastPing { get; init; } = DateTime.UtcNow;
+    public DateTime LastPush { get; init; } = DateTime.MinValue;
+    public DateTime LastPing { get; init; } = DateTime.MinValue;
 
     /// <summary>数据是否新鲜（10 秒内有更新）</summary>
     public bool IsFresh => (DateTime.UtcNow - LastPush).TotalSeconds < 10;
@@ -69,6 +69,25 @@ public sealed class BrokerPushReceiver : ISysMonBrokerPush
     }
 
     public bool IsBrokerAvailable => Snapshot.IsAlive && Snapshot.IsFresh;
+
+    public void PushSnapshot(double cpuTemperature, string cpuSource,
+        IEnumerable<KeyValuePair<int, BrokerGpuSnapshot>> gpus,
+        IReadOnlyList<BrokerSensorEntry> sensors)
+    {
+        var now = DateTime.UtcNow;
+        lock (_lock)
+        {
+            _snapshot = new BrokerSensorSnapshot
+            {
+                CpuTemperature = cpuTemperature > 0 ? cpuTemperature : -1,
+                CpuSource = string.IsNullOrWhiteSpace(cpuSource) ? "None" : cpuSource,
+                Gpus = new ConcurrentDictionary<int, BrokerGpuSnapshot>(gpus),
+                AllSensors = sensors,
+                LastPush = now,
+                LastPing = now,
+            };
+        }
+    }
 
     // ===== ISysMonBrokerPush 实现 =====
 

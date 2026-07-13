@@ -4,6 +4,7 @@ PowerToys-sdk/
 # .NET
 bin/
 obj/
+Generated Files/
 *.user
 *.suo
 *.vs/

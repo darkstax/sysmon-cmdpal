@@ -1,5 +1,5 @@
 // Copyright (c) 2026 SysMonCmdPal
-// SensorChainConfig 测试 — 向后兼容 + 保存/加载往返
+// SensorChainConfig 测试 — 旧 PrecisionMode 兼容 + 保存/加载往返
 
 using System.Text.Json;
 using Xunit;
@@ -33,7 +33,7 @@ public class SensorChainConfigTests
     }
 
     // ================================================================
-    // PrecisionModeStr → PrecisionMode 映射
+    // 旧 PrecisionMode 字段 -> 兼容投影
     // ================================================================
 
     [Theory]
@@ -42,18 +42,18 @@ public class SensorChainConfigTests
     [InlineData("None", PrecisionMode.None)]
     [InlineData("Invalid", PrecisionMode.None)]   // TryParse fails → fallback None
     [InlineData("", PrecisionMode.None)]          // empty → TryParse fails → fallback None
-    public void PrecisionModeStr_MapsToPrecisionMode(string str, PrecisionMode expected)
+    public void LegacyPrecisionModeStr_MapsToCompatibilityProjection(string str, PrecisionMode expected)
     {
         var cfg = new SensorChainConfig { PrecisionModeStr = str };
         Assert.Equal(expected, cfg.PrecisionMode);
     }
 
     // ================================================================
-    // 设置 PrecisionMode 属性会同步更新 PrecisionModeStr
+    // 兼容投影 setter 仍会同步更新底层序列化字段
     // ================================================================
 
     [Fact]
-    public void SetPrecisionMode_UpdatesPrecisionModeStr()
+    public void CompatibilityProjectionSetter_UpdatesStoredPrecisionModeStr()
     {
         var cfg = new SensorChainConfig { PrecisionModeStr = "None" };
         Assert.Equal(PrecisionMode.None, cfg.PrecisionMode);
@@ -75,18 +75,18 @@ public class SensorChainConfigTests
     [InlineData("Broker", true)]
     [InlineData("None", false)]
     [InlineData("HWiNFO", false)]
-    public void HighPrecision_ReflectsPrecisionMode(string str, bool expected)
+    public void HighPrecision_ReflectsCompatibilityProjection(string str, bool expected)
     {
         var cfg = new SensorChainConfig { PrecisionModeStr = str };
         Assert.Equal(expected, cfg.HighPrecision);
     }
 
     // ================================================================
-    // Save/Load 往返 — 使用临时路径避免污染真实配置
+    // Save/Load 往返 — 保留旧字段但不引入手动切换语义
     // ================================================================
 
     [Fact]
-    public void SaveLoad_Roundtrip_PreservesPrecisionModeStr()
+    public void SaveLoad_Roundtrip_PreservesLegacyPrecisionModeStr()
     {
         WithTempConfig(tempPath =>
         {
@@ -103,7 +103,7 @@ public class SensorChainConfigTests
     }
 
     [Fact]
-    public void SaveLoad_Roundtrip_PreservesBrokerMode()
+    public void SaveLoad_Roundtrip_PreservesLegacyBrokerPreferenceString()
     {
         WithTempConfig(tempPath =>
         {
@@ -121,7 +121,7 @@ public class SensorChainConfigTests
     // ================================================================
 
     [Fact]
-    public void Load_ParsesCamelCaseJson()
+    public void Load_ParsesCamelCaseLegacyPrecisionField()
     {
         WithTempConfig(tempPath =>
         {
@@ -134,7 +134,7 @@ public class SensorChainConfigTests
     }
 
     [Fact]
-    public void Load_MissingFile_ReturnsDefaults()
+    public void Load_MissingFile_ReturnsCompatibilityDefaults()
     {
         WithTempConfig(tempPath =>
         {
@@ -150,7 +150,7 @@ public class SensorChainConfigTests
     }
 
     // ================================================================
-    // 旧版兼容: HWiNFO → None (explicit backward-compat in PrecisionMode getter)
+    // 旧版兼容: HWiNFO -> None，同时保留原始字符串
     // ================================================================
 
     [Fact]
@@ -163,6 +163,26 @@ public class SensorChainConfigTests
             var loaded = SensorChainConfig.Load();
             Assert.Equal("HWiNFO", loaded.PrecisionModeStr);
             Assert.Equal(PrecisionMode.None, loaded.PrecisionMode);
+        });
+    }
+
+    [Fact]
+    public void Save_AfterLoadingLegacyHwInfoJson_PreservesStoredLegacyString()
+    {
+        WithTempConfig(tempPath =>
+        {
+            File.WriteAllText(tempPath, @"{""version"":""3"",""precisionModeStr"":""HWiNFO""}");
+
+            var loaded = SensorChainConfig.Load();
+            loaded.Save();
+
+            var roundTripped = JsonSerializer.Deserialize(
+                File.ReadAllText(tempPath),
+                ConfigJsonContext.Default.SensorChainConfig);
+
+            Assert.NotNull(roundTripped);
+            Assert.Equal("HWiNFO", roundTripped!.PrecisionModeStr);
+            Assert.Equal(PrecisionMode.None, roundTripped.PrecisionMode);
         });
     }
 }

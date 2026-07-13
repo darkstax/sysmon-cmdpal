@@ -11,7 +11,7 @@
   <Identity
     Name="darkstax.SysPulseforCommandPalette"
     Publisher="CN=B58A0E15-179C-417E-BD92-D081080DA9A7"
-    Version="1.3.0.8" />
+    Version="1.5.0.0" />
 
   <Properties>
     <DisplayName>SysPulse for Command Palette</DisplayName>

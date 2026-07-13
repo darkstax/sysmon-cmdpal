@@ -1,16 +1,15 @@
 // Copyright (c) 2026 SysMonCmdPal
 // 网络详情页 — FormContent + AdaptiveCards + SVG 图表
 
-using System.Timers;
 using Microsoft.CommandPalette.Extensions;
 using Microsoft.CommandPalette.Extensions.Toolkit;
 
 namespace SysMonCmdPal;
 
-internal sealed partial class NetworkDetailPage : ContentPage
+internal sealed partial class NetworkDetailPage : RefreshingContentPage
 {
     private readonly FormContent _form = new();
-    private bool _subscribed;
+    private readonly CopyTextCommand _copyCommand = new(string.Empty);
 
     private const string Template = """
     {
@@ -150,16 +149,9 @@ internal sealed partial class NetworkDetailPage : ContentPage
         Icon = new IconInfo("");
         Title = Loc.Get("Network.PageTitle");
         Name = Loc.Get("MainPage.NetworkTitle");
+        Commands = [new CommandContextItem(_copyCommand) { Title = Loc.Get("Common.CopyCurrentMetrics") }];
         _form.TemplateJson = Template;
         _form.DataJson = """{"netDown":"—","netUp":"—","ssid":"","downScale":"","upScale":"","downChartUrl":"","upChartUrl":""}""";
-    }
-
-    public void StartTimer()
-    {
-        if (_subscribed) return;
-        _subscribed = true;
-        DockBandRefreshCoordinator.Subscribe(Update);
-        ThreadPool.QueueUserWorkItem(_ => Update());
     }
 
     public override IContent[] GetContent()
@@ -168,7 +160,7 @@ internal sealed partial class NetworkDetailPage : ContentPage
         return [_form];
     }
 
-    private void Update()
+    protected override void RefreshContent()
     {
         try
         {
@@ -180,19 +172,21 @@ internal sealed partial class NetworkDetailPage : ContentPage
             string downScale = SystemInfoService.Instance.NetDownChart.GetCurrentScaleLabel();
             string upScale = SystemInfoService.Instance.NetUpChart.GetCurrentScaleLabel();
 
+            var ssid = SystemInfoService.Instance.GetWifiSsid();
             var data = new Dictionary<string, string>
             {
                 ["netDown"] = DockFormat.Speed(info.NetDown),
                 ["netUp"] = DockFormat.Speed(info.NetUp),
-                ["ssid"] = string.IsNullOrEmpty(SystemInfoService.Instance.GetWifiSsid())
+                ["ssid"] = string.IsNullOrEmpty(ssid)
                     ? "未连接 Wi-Fi"
-                    : $"SSID: {SystemInfoService.Instance.GetWifiSsid()}",
+                    : $"SSID: {ssid}",
                 ["downScale"] = downScale,
                 ["upScale"] = upScale,
                 ["downChartUrl"] = downUrl,
                 ["upChartUrl"] = upUrl,
             };
 
+            _copyCommand.Text = $"Network ↓ {FormatSpeedOrNA(info.NetDown)} · ↑ {FormatSpeedOrNA(info.NetUp)}";
             _form.DataJson = JsonHelper.ToJson(data);
         }
         catch (Exception ex)
@@ -200,4 +194,6 @@ internal sealed partial class NetworkDetailPage : ContentPage
             System.Diagnostics.Debug.WriteLine($"[NetworkDetailPage] Update failed: {ex.Message}");
         }
     }
+
+    private static string FormatSpeedOrNA(double value) => value >= 0 ? DockFormat.Speed(value) : Loc.Get("Common.NA");
 }

@@ -1,5 +1,5 @@
-# SysMonCmdPal 一键部署脚本
-# 自动安装 MSIX 扩展 + 部署 Broker (计划任务自启动)
+﻿# SysMonCmdPal 一键部署脚本
+# 安装 MSIX 扩展 + 部署受保护的 Broker 计划任务
 #
 # 用法:
 #   .\deploy.ps1                       # 完整安装（MSIX + Broker）
@@ -11,15 +11,25 @@ param(
     [ValidateSet("Install", "Uninstall")]
     [string]$Action = "Install",
     [switch]$SkipBuild,
-    [switch]$BrokerOnly
+    [switch]$BrokerOnly,
+    [switch]$ElevatedBroker,
+    [string]$TaskUserId = ""
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = $PSScriptRoot
-$BrokerTargetDir = Join-Path $env:LOCALAPPDATA "SysMonBroker"
+$PackageName = "darkstax.SysPulseforCommandPalette"
+
+$BrokerTargetRoot = Join-Path $env:ProgramFiles "SysMonCmdPal"
+$BrokerTargetDir = Join-Path $BrokerTargetRoot "Broker"
 $BrokerExe = Join-Path $BrokerTargetDir "SysMonBroker.exe"
+$BrokerDataRoot = Join-Path $env:ProgramData "SysMonCmdPal"
+$BrokerLogDir = Join-Path $BrokerDataRoot "Logs"
 $TaskName = "SysMonBroker"
-$LogFile = Join-Path $BrokerTargetDir "deploy.log"
+
+$LogDir = Join-Path $env:TEMP "SysMonCmdPal"
+$LogFile = Join-Path $LogDir "deploy.log"
+$LegacyBrokerTargetDir = Join-Path $env:LOCALAPPDATA "SysMonBroker"
 
 # ── Helpers ──────────────────────────────────────────────────
 
@@ -29,48 +39,190 @@ function Log($msg) {
     Write-Host $line
 }
 
-function Ensure-Admin {
+function Test-IsAdmin {
     $current = [Security.Principal.WindowsPrincipal]::new(
         [Security.Principal.WindowsIdentity]::GetCurrent())
-    if (-not $current.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        Write-Host "需要管理员权限，正在提升..." -ForegroundColor Yellow
-        $argList = "-ExecutionPolicy Bypass -NoProfile -File `"$PSCommandPath`" -Action $Action"
-        if ($SkipBuild)   { $argList += " -SkipBuild" }
-        if ($BrokerOnly)  { $argList += " -BrokerOnly" }
-        Start-Process pwsh -ArgumentList $argList -Verb RunAs -Wait
-        exit
+    return $current.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Get-CurrentUserId {
+    try { return [Security.Principal.WindowsIdentity]::GetCurrent().Name }
+    catch { return "$env:USERDOMAIN\$env:USERNAME" }
+}
+
+function Invoke-ElevatedBroker {
+    param(
+        [ValidateSet("Install", "Uninstall")]
+        [string]$BrokerAction
+    )
+
+    if (Test-IsAdmin) {
+        if ($BrokerAction -eq "Uninstall") {
+            Uninstall-Broker
+        } else {
+            Deploy-Broker
+        }
+        return
+    }
+
+    $targetUser = if ($TaskUserId) { $TaskUserId } else { Get-CurrentUserId }
+    $argList = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", "`"$PSCommandPath`"",
+        "-Action", $BrokerAction,
+        "-SkipBuild",
+        "-BrokerOnly",
+        "-ElevatedBroker",
+        "-TaskUserId", "`"$targetUser`""
+    )
+
+    Log "Broker 操作需要管理员权限，正在单独提升..."
+    $shell = if ($PSVersionTable.PSEdition -eq "Core" -and $PSHOME) {
+        Join-Path $PSHOME "pwsh.exe"
+    } else {
+        $cmd = Get-Command pwsh.exe -ErrorAction SilentlyContinue
+        if ($cmd) { $cmd.Source } else { $null }
+    }
+    if (-not $shell) { $shell = "pwsh.exe" }
+    $p = Start-Process $shell -ArgumentList $argList -Verb RunAs -Wait -PassThru
+    if ($p.ExitCode -ne 0) {
+        throw "Broker elevated action failed with exit code $($p.ExitCode)"
+    }
+}
+
+function Get-MSBuildPath {
+    $candidates = @(
+        "${env:ProgramFiles(x86)}\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\amd64\MSBuild.exe",
+        "${env:ProgramFiles(x86)}\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe",
+        "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\MSBuild.exe",
+        "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe",
+        "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
+    )
+
+    foreach ($p in $candidates) {
+        if (Test-Path $p) { return $p }
+    }
+
+    throw "找不到 MSBuild。请安装 Visual Studio Build Tools，并确保包含 MSIX/AppX 构建工具链。"
+}
+
+function Get-AppxMSBuildToolsPath {
+    $candidates = @(
+        "${env:ProgramFiles(x86)}\Microsoft Visual Studio\18\BuildTools\MSBuild\Microsoft\VisualStudio\v18.0\AppxPackage\",
+        "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage\"
+    )
+
+    foreach ($p in $candidates) {
+        if (Test-Path $p) { return $p }
+    }
+
+    return $null
+}
+
+function Set-ProtectedDirectoryAcl {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) {
+        New-Item -ItemType Directory -Path $Path -Force | Out-Null
+    }
+
+    $aclArgs = @(
+        $Path,
+        "/inheritance:r",
+        "/grant:r",
+        "*S-1-5-18:(OI)(CI)F",
+        "*S-1-5-32-544:(OI)(CI)F",
+        "*S-1-5-32-545:(OI)(CI)RX"
+    )
+    & icacls @aclArgs | Out-Null
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "设置目录 ACL 失败: $Path"
+    }
+}
+
+function Unblock-LocalFile {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) {
+        return
+    }
+
+    try {
+        Unblock-File -LiteralPath $Path -ErrorAction Stop
+        return
+    } catch {
+        try {
+            Remove-Item -LiteralPath $Path -Stream Zone.Identifier -ErrorAction SilentlyContinue
+        } catch {
+            # Some file systems do not support alternate streams; safe to ignore.
+        }
     }
 }
 
 # ── Build ────────────────────────────────────────────────────
 
-function Build-Projects {
-    Log "=== 构建项目 ==="
+function Build-Msix {
+    Log "构建 SysMonCmdPal MSIX (Release/x64)..."
 
+    $msbuild = Get-MSBuildPath
+    $appxTools = Get-AppxMSBuildToolsPath
     $mainProj = Join-Path $ProjectRoot "SysMonCmdPal\SysMonCmdPal.csproj"
-    Log "构建 SysMonCmdPal (Release/x64)..."
-    & dotnet build $mainProj -c Release -p:Platform=x64 --nologo -v q 2>&1 |
-        Where-Object { $_ -match "error CS|warning CS" } |
-        ForEach-Object { Log "  $_" }
+    $args = @(
+        $mainProj,
+        "/restore",
+        "/p:Configuration=Release",
+        "/p:Platform=x64",
+        "/m",
+        "/p:VcpkgEnabled=false",
+        "/p:EnforceCodeStyleInBuild=false",
+        "/p:RunAnalyzers=false",
+        "/p:TreatWarningsAsErrors=false",
+        "/v:minimal"
+    )
+    if ($appxTools) {
+        $args += "/p:AppxMSBuildToolsPath=$appxTools"
+    }
+
+    & $msbuild @args
+
     if ($LASTEXITCODE -ne 0) {
-        Log "FATAL: SysMonCmdPal 构建失败"
+        Log "FATAL: SysMonCmdPal MSIX 构建失败"
         exit 1
     }
-    Log "SysMonCmdPal OK"
 
+    Log "SysMonCmdPal MSIX OK"
+}
+
+function Build-Broker {
+    $msbuild = Get-MSBuildPath
     $brokerProj = Join-Path $ProjectRoot "SysMonBroker\SysMonBroker.csproj"
-    if (Test-Path $brokerProj) {
-        Log "构建 SysMonBroker (self-contained)..."
-        & dotnet publish $brokerProj -c Release -r win-x64 --self-contained `
-            -p:PublishSingleFile=true --nologo -v q 2>&1 |
-            Where-Object { $_ -match "error CS|warning CS" } |
-            ForEach-Object { Log "  $_" }
-        if ($LASTEXITCODE -ne 0) {
-            Log "WARNING: SysMonBroker 构建失败，将使用已有 exe"
-        } else {
-            Log "SysMonBroker OK"
-        }
+    if (-not (Test-Path $brokerProj)) {
+        Log "WARNING: 找不到 SysMonBroker.csproj"
+        return
     }
+
+    Log "构建 SysMonBroker (self-contained)..."
+    & $msbuild $brokerProj /restore /t:Publish `
+        /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 `
+        /p:SelfContained=true /p:PublishSingleFile=true `
+        /p:VcpkgEnabled=false /p:EnforceCodeStyleInBuild=false `
+        /p:RunAnalyzers=false /p:TreatWarningsAsErrors=false `
+        /v:minimal
+
+    if ($LASTEXITCODE -ne 0) {
+        Log "FATAL: SysMonBroker 构建失败"
+        exit 1
+    }
+
+    Log "SysMonBroker OK"
+}
+
+function Build-Projects {
+    Log "=== 构建项目 ==="
+    Build-Msix
+    Build-Broker
 }
 
 # ── MSIX Install ─────────────────────────────────────────────
@@ -80,8 +232,7 @@ function Install-Msix {
 
     $msixRoot = Join-Path $ProjectRoot "SysMonCmdPal\bin\x64\Release\net10.0-windows10.0.26100.0\win-x64\AppPackages"
     if (-not (Test-Path $msixRoot)) {
-        Log "FATAL: 找不到 Release 构建输出，请先构建项目"
-        Log "  dotnet build SysMonCmdPal\SysMonCmdPal.csproj -c Release -p:Platform=x64"
+        Log "FATAL: 找不到 Release MSIX 输出，请先使用 MSBuild 构建 SysMonCmdPal.csproj 的 Release/x64 包"
         exit 1
     }
 
@@ -95,15 +246,13 @@ function Install-Msix {
     $sizeMB = [math]::Round($msix.Length / 1MB, 1)
     Log "File: $($msix.Name) ($sizeMB MB)"
 
-    # Remove old version first
-    $old = Get-AppxPackage -Name "SysMonCmdPal" -ErrorAction SilentlyContinue
-    if ($old) {
+    $oldPkgs = @(Get-AppxPackage -Name $PackageName -ErrorAction SilentlyContinue)
+    foreach ($old in $oldPkgs) {
         Log "移除旧版本: $($old.PackageFullName)"
         Remove-AppxPackage $old.PackageFullName -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
     }
 
-    # Clean CmdPal extension cache
     $cacheDir = "$env:LOCALAPPDATA\Microsoft\PowerToys\CmdPal"
     if (Test-Path $cacheDir) {
         Remove-Item $cacheDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -113,24 +262,28 @@ function Install-Msix {
     Add-AppxPackage -Path $msix.FullName -ErrorAction Stop
     Log "MSIX 安装成功"
 
-    $pkg = Get-AppxPackage -Name "SysMonCmdPal" -ErrorAction SilentlyContinue
+    $pkg = Get-AppxPackage -Name $PackageName -ErrorAction SilentlyContinue
     if ($pkg) {
         Log "已安装: $($pkg.PackageFullName)"
+    } else {
+        Log "WARNING: 安装后未通过包名查询到 $PackageName"
     }
 }
 
 # ── Broker Deploy ────────────────────────────────────────────
 
 function Deploy-Broker {
+    if (-not (Test-IsAdmin)) {
+        throw "Broker 部署必须在管理员权限下执行"
+    }
+
     Log "=== 部署 Broker ==="
 
-    # Find Broker exe (search order matters)
     $candidates = @(
-        # dotnet publish output
+        (Join-Path $ProjectRoot "SysMonBroker\bin\x64\Release\net10.0-windows10.0.26100.0\win-x64\publish\SysMonBroker.exe"),
         (Join-Path $ProjectRoot "SysMonBroker\bin\Release\net10.0-windows10.0.26100.0\win-x64\publish\SysMonBroker.exe"),
-        # Pre-built artifact
         (Join-Path $ProjectRoot "SysMonCmdPal\Broker\SysMonBroker.exe"),
-        # Non-publish build output
+        (Join-Path $ProjectRoot "SysMonBroker\bin\x64\Release\net10.0-windows10.0.26100.0\win-x64\SysMonBroker.exe"),
         (Join-Path $ProjectRoot "SysMonBroker\bin\Release\net10.0-windows10.0.26100.0\win-x64\SysMonBroker.exe")
     )
 
@@ -141,35 +294,44 @@ function Deploy-Broker {
 
     if (-not $srcExe) {
         Log "WARNING: 找不到 SysMonBroker.exe"
-        Log "  Broker 是可选的 — 扩展会使用 HWiNFO / ADL / ThermalZone 作为温度源"
+        Log "  Broker 是可选的 — 扩展会使用 HWiNFO / D3DKMT / PDH / ThermalZone 回退"
         return
     }
 
-    # Prepare directory
-    if (-not (Test-Path $BrokerTargetDir)) {
-        New-Item -ItemType Directory -Path $BrokerTargetDir -Force | Out-Null
-    }
+    Set-ProtectedDirectoryAcl $BrokerTargetRoot
+    Set-ProtectedDirectoryAcl $BrokerTargetDir
+    Set-ProtectedDirectoryAcl $BrokerDataRoot
+    Set-ProtectedDirectoryAcl $BrokerLogDir
 
-    # Stop existing
-    Get-Process SysMonBroker -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-Process SysMonBroker -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
 
-    # Remove old task
     $oldTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($oldTask) {
         Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 1
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+        Log "已移除旧 Broker 计划任务"
     }
 
-    # Copy
-    if (Test-Path $BrokerExe) { Remove-Item $BrokerExe -Force -ErrorAction SilentlyContinue }
+    if (Test-Path $BrokerExe) {
+        Remove-Item $BrokerExe -Force -ErrorAction SilentlyContinue
+    }
     Copy-Item $srcExe $BrokerExe -Force
-    Log "已部署: SysMonBroker.exe ($([math]::Round((Get-Item $BrokerExe).Length/1MB,1)) MB)"
+    Unblock-LocalFile $BrokerExe
+    Log "已部署: $BrokerExe ($([math]::Round((Get-Item $BrokerExe).Length/1MB,1)) MB)"
 
-    # Scheduled task: auto-start on login, highest privileges, auto-restart
+    # 清理旧版用户可写 Broker 目录（同账户升级场景）
+    if ((Test-Path $LegacyBrokerTargetDir) -and
+        ($LegacyBrokerTargetDir -ne $BrokerTargetDir)) {
+        Remove-Item $LegacyBrokerTargetDir -Recurse -Force -ErrorAction SilentlyContinue
+        Log "已清理旧版 Broker 目录: $LegacyBrokerTargetDir"
+    }
+
+    $principalUser = if ($TaskUserId) { $TaskUserId } else { Get-CurrentUserId }
     $taskAction    = New-ScheduledTaskAction -Execute $BrokerExe -WorkingDirectory $BrokerTargetDir
     $taskTrigger   = New-ScheduledTaskTrigger -AtLogOn
-    $taskPrincipal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -RunLevel Highest -LogonType Interactive
+    $taskPrincipal = New-ScheduledTaskPrincipal -UserId $principalUser -RunLevel Highest -LogonType Interactive
     $taskSettings  = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) `
@@ -180,11 +342,10 @@ function Deploy-Broker {
         -TaskName $TaskName `
         -Action $taskAction -Trigger $taskTrigger `
         -Principal $taskPrincipal -Settings $taskSettings `
-        -Description "SysMonCmdPal Broker — 高精度硬件温度读取 (PawnIO)" `
+        -Description "SysMonCmdPal Broker — 高精度硬件温度读取 (LibreHardwareMonitor)" `
         -Force | Out-Null
-    Log "计划任务已注册: 登录时自动启动 (最高权限)"
+    Log "计划任务已注册: 登录时自动启动 (最高权限, User=$principalUser)"
 
-    # Start now
     Start-ScheduledTask -TaskName $TaskName
     Start-Sleep -Seconds 3
 
@@ -192,53 +353,63 @@ function Deploy-Broker {
     if ($proc) {
         Log "Broker 运行中: PID $($proc.Id)"
     } else {
-        Log "NOTE: Broker 进程未检测到 — 可能 PawnIO 驱动未安装"
-        Log "  没有 PawnIO 时 Broker 会正常退出，不影响扩展使用"
-        Log "  安装 PawnIO 驱动后 Broker 即可提供精准温度"
+        Log "NOTE: Broker 进程未检测到 — 可能 PawnIO 驱动未安装或传感器初始化失败"
+        Log "  Broker 缺席时扩展会自动使用用户态回退链"
     }
 }
 
 # ── Uninstall ────────────────────────────────────────────────
 
-function Uninstall-All {
-    Log "=== 卸载 SysMonCmdPal ==="
+function Uninstall-Broker {
+    if (-not (Test-IsAdmin)) {
+        throw "Broker 卸载必须在管理员权限下执行"
+    }
 
-    # Broker
-    Get-Process SysMonBroker -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Log "=== 卸载 Broker ==="
+
+    Get-Process SysMonBroker -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+
     $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($task) {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
         Log "已移除 Broker 计划任务"
     }
-    if (Test-Path $BrokerTargetDir) {
-        Remove-Item $BrokerTargetDir -Recurse -Force -ErrorAction SilentlyContinue
-        Log "已移除 Broker 目录"
+
+    if (Test-Path $BrokerTargetRoot) {
+        Remove-Item $BrokerTargetRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Log "已移除 Broker 目录: $BrokerTargetRoot"
     }
 
-    # MSIX
-    $pkg = Get-AppxPackage -Name "SysMonCmdPal" -ErrorAction SilentlyContinue
-    if ($pkg) {
-        Remove-AppxPackage $pkg.PackageFullName -ErrorAction SilentlyContinue
-        Log "已移除 MSIX: $($pkg.PackageFullName)"
+    if (Test-Path $LegacyBrokerTargetDir) {
+        Remove-Item $LegacyBrokerTargetDir -Recurse -Force -ErrorAction SilentlyContinue
+        Log "已移除旧版 Broker 目录: $LegacyBrokerTargetDir"
+    }
+}
+
+function Uninstall-Msix {
+    Log "=== 卸载 MSIX ==="
+
+    $pkgs = @(Get-AppxPackage -Name $PackageName -ErrorAction SilentlyContinue)
+    if ($pkgs.Count -gt 0) {
+        foreach ($pkg in $pkgs) {
+            Remove-AppxPackage $pkg.PackageFullName -ErrorAction SilentlyContinue
+            Log "已移除 MSIX: $($pkg.PackageFullName)"
+        }
     } else {
         Log "MSIX 未安装"
     }
 
-    # Cache
     $cacheDir = "$env:LOCALAPPDATA\Microsoft\PowerToys\CmdPal"
     if (Test-Path $cacheDir) {
         Remove-Item $cacheDir -Recurse -Force -ErrorAction SilentlyContinue
         Log "已清理 CmdPal 缓存"
     }
-
-    Log "=== 卸载完成 ==="
 }
 
 # ── Main ─────────────────────────────────────────────────────
 
 try {
-    Ensure-Admin
-
     if (-not (Test-Path (Split-Path $LogFile -Parent))) {
         New-Item -ItemType Directory -Path (Split-Path $LogFile -Parent) -Force | Out-Null
     }
@@ -246,24 +417,39 @@ try {
     Log ""
     Log "========================================"
     Log " SysMonCmdPal Deploy"
-    Log " Action=$Action  SkipBuild=$SkipBuild  BrokerOnly=$BrokerOnly"
+    Log " Action=$Action  SkipBuild=$SkipBuild  BrokerOnly=$BrokerOnly  ElevatedBroker=$ElevatedBroker"
     Log "========================================"
 
-    if ($Action -eq "Uninstall") {
-        Uninstall-All
+    if ($ElevatedBroker) {
+        if ($Action -eq "Uninstall") {
+            Uninstall-Broker
+        } else {
+            Deploy-Broker
+        }
         exit 0
     }
 
-    # ── Install ──
-    if (-not $SkipBuild -and -not $BrokerOnly) {
+    if ($Action -eq "Uninstall") {
+        Uninstall-Msix
+        Invoke-ElevatedBroker -BrokerAction Uninstall
+        Log "=== 卸载完成 ==="
+        exit 0
+    }
+
+    if ($BrokerOnly) {
+        if (-not $SkipBuild) {
+            Build-Broker
+        }
+        Invoke-ElevatedBroker -BrokerAction Install
+        exit 0
+    }
+
+    if (-not $SkipBuild) {
         Build-Projects
     }
 
-    if (-not $BrokerOnly) {
-        Install-Msix
-    }
-
-    Deploy-Broker
+    Install-Msix
+    Invoke-ElevatedBroker -BrokerAction Install
 
     Log ""
     Log "========================================"

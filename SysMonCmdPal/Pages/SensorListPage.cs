@@ -4,7 +4,6 @@
 
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using Microsoft.CommandPalette.Extensions;
 using Microsoft.CommandPalette.Extensions.Toolkit;
 using SysMonCmdPal.Broker;
@@ -29,59 +28,101 @@ internal sealed partial class SensorListPage : ListPage
         var snap = BrokerPushReceiver.Instance.Snapshot;
         if (!snap.IsFresh || snap.AllSensors.Count == 0)
         {
-            return [
-                new ListItem(NoOpPage.Instance)
-                {
-                    Title = Loc.Get("Sensor.NoData"),
-                    Subtitle = snap.IsAlive
-                        ? Loc.Get("Sensor.NoDataAlive")
-                        : Loc.Get("Sensor.NoDataDead"),
-                    Icon = new IconInfo(""),
-                }
-            ];
+            return CreateNoDataItems(snap);
         }
 
-        // 按 tag 分组
-        var grouped = snap.AllSensors
-            .GroupBy(s => s.Tag)
-            .OrderBy(g => g.Key)
-            .ToList();
+        var items = new List<IListItem>(ShmLayout.BrowseCategories.Count + snap.AllSensors.Count);
+        items.AddRange(CreateCategoryItems(snap));
+        items.AddRange(CreateSensorItems(snap.AllSensors));
 
-        var items = new List<IListItem>();
-
-        foreach (var group in grouped)
-        {
-            string categoryName = ShmLayout.TagName(group.Key);
-            string categoryUnit = ShmLayout.TagUnit(group.Key);
-
-            foreach (var sensor in group.OrderBy(s => s.Name))
-            {
-                string valueStr = FormatSensorValue(sensor.Value, sensor.Unit);
-                items.Add(new ListItem(NoOpPage.Instance)
-                {
-                    Title = Loc.Format("Sensor.ItemTitle", categoryName, sensor.Name),
-                    Subtitle = valueStr,
-                    Icon = new IconInfo(GetCategoryIcon(group.Key)),
-                });
-            }
-        }
-
-        if (items.Count == 0)
-        {
-            return [
-                new ListItem(NoOpPage.Instance)
-                {
-                    Title = Loc.Get("Sensor.EmptyList"),
-                    Subtitle = Loc.Get("Sensor.EmptyListDetail"),
-                    Icon = new IconInfo(""),
-                }
-            ];
-        }
-
-        return items.ToArray();
+        return items.Count == 0 ? CreateEmptyItems() : items.ToArray();
     }
 
-    private static string FormatSensorValue(double value, string unit)
+    private static IEnumerable<IListItem> CreateCategoryItems(BrokerSensorSnapshot snap)
+    {
+        return ShmLayout.BrowseCategories.Select(category =>
+        {
+            int count = snap.AllSensors.Count(sensor => ShmLayout.BrowseCategoryMatchesTag(category, sensor.Tag));
+            int representativeTag = ShmLayout.BrowseCategoryRepresentativeTag(category);
+
+            return (IListItem)new ListItem(new SensorCategoryPage(category))
+            {
+                Title = ShmLayout.BrowseCategoryName(category),
+                Subtitle = Loc.Format("Sensor.BrowseCount", count),
+                Icon = new IconInfo(GetCategoryIcon(representativeTag)),
+            };
+        });
+    }
+
+    internal static IListItem[] CreateNoDataItems(BrokerSensorSnapshot snap)
+    {
+        return
+        [
+            new ListItem(NoOpPage.Instance)
+            {
+                Title = Loc.Get("Sensor.NoData"),
+                Subtitle = GetNoDataSubtitle(snap),
+                Icon = new IconInfo(""),
+            }
+        ];
+    }
+
+    private static string GetNoDataSubtitle(BrokerSensorSnapshot snap)
+    {
+        var diag = SharedMemoryReader.Diagnostics;
+
+        if (snap.IsAlive && snap.IsFresh)
+            return Loc.Get("Sensor.NoDataAlive");
+
+        if (diag.IsConnected && snap.LastPush != DateTime.MinValue)
+        {
+            int seconds = Math.Max(0, (int)(DateTime.UtcNow - snap.LastPush).TotalSeconds);
+            return Loc.Format("Sensor.NoDataStale", seconds);
+        }
+
+        if (!string.IsNullOrWhiteSpace(diag.LastError))
+            return Loc.Format("Sensor.NoDataError", diag.LastError);
+
+        return Loc.Get("Sensor.NoDataUnavailable");
+    }
+
+    internal static IListItem[] CreateEmptyItems()
+    {
+        return
+        [
+            new ListItem(NoOpPage.Instance)
+            {
+                Title = Loc.Get("Sensor.EmptyList"),
+                Subtitle = Loc.Get("Sensor.EmptyListDetail"),
+                Icon = new IconInfo(""),
+            }
+        ];
+    }
+
+    internal static IListItem[] CreateSensorItems(IEnumerable<BrokerSensorEntry> sensors)
+    {
+        return sensors
+            .GroupBy(sensor => sensor.Tag)
+            .OrderBy(group => group.Key)
+            .SelectMany(group => group.OrderBy(sensor => sensor.Name))
+            .Select(CreateSensorItem)
+            .ToArray();
+    }
+
+    internal static IListItem CreateSensorItem(BrokerSensorEntry sensor)
+    {
+        string categoryName = ShmLayout.TagName(sensor.Tag);
+        string valueStr = FormatSensorValue(sensor.Value, sensor.Unit);
+
+        return new ListItem(NoOpPage.Instance)
+        {
+            Title = Loc.Format("Sensor.ItemTitle", categoryName, sensor.Name),
+            Subtitle = valueStr,
+            Icon = new IconInfo(GetCategoryIcon(sensor.Tag)),
+        };
+    }
+
+    internal static string FormatSensorValue(double value, string unit)
     {
         if (unit == "°C")
             return $"**{value:F1}°C**";
@@ -100,7 +141,7 @@ internal sealed partial class SensorListPage : ListPage
         return $"**{value:F2}** {unit}";
     }
 
-    private static string GetCategoryIcon(int tag) => tag switch
+    internal static string GetCategoryIcon(int tag) => tag switch
     {
         0 or 1 or 2 or 3 or 4 => "",    // CPU
         5 or 6 or 7 or 8 or 9 or 10 or 11 => "",  // GPU
@@ -108,6 +149,50 @@ internal sealed partial class SensorListPage : ListPage
         15 or 16 => "",                    // Storage
         _ => "",
     };
+}
+
+internal sealed partial class SensorCategoryPage : ListPage
+{
+    private readonly int _category;
+
+    public SensorCategoryPage(int category)
+    {
+        _category = category;
+        int representativeTag = ShmLayout.BrowseCategoryRepresentativeTag(category);
+
+        Icon = new IconInfo(SensorListPage.GetCategoryIcon(representativeTag));
+        Title = ShmLayout.BrowseCategoryName(category);
+        Name = $"SensorCategory:{category}";
+    }
+
+    public override IListItem[] GetItems()
+    {
+        var snap = BrokerPushReceiver.Instance.Snapshot;
+        if (!snap.IsFresh || snap.AllSensors.Count == 0)
+        {
+            return SensorListPage.CreateNoDataItems(snap);
+        }
+
+        var sensors = snap.AllSensors
+            .Where(sensor => ShmLayout.BrowseCategoryMatchesTag(_category, sensor.Tag))
+            .ToArray();
+
+        if (sensors.Length == 0)
+        {
+            return
+            [
+                new ListItem(NoOpPage.Instance)
+                {
+                    Title = Loc.Get("Sensor.EmptyList"),
+                    Subtitle = Loc.Format("Sensor.CategoryEmptyDetail", ShmLayout.BrowseCategoryName(_category)),
+                    Icon = new IconInfo(SensorListPage.GetCategoryIcon(
+                        ShmLayout.BrowseCategoryRepresentativeTag(_category))),
+                }
+            ];
+        }
+
+        return SensorListPage.CreateSensorItems(sensors);
+    }
 }
 
 /// <summary>空页面 — 传感器条目不需要跳转</summary>

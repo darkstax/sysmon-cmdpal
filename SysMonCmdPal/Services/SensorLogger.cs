@@ -10,6 +10,7 @@ namespace SysMonCmdPal;
 internal static class SensorLogger
 {
     private const long MaxLogSize = 10 * 1024 * 1024; // 10MB
+    private static readonly bool ReleaseForceLogEnabled = IsReleaseForceLogEnabled();
 
     private static string LogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -45,6 +46,11 @@ internal static class SensorLogger
 
     public static void ForceLog(string msg)
     {
+#if !DEBUG
+        if (!ReleaseForceLogEnabled)
+            return;
+#endif
+
         try
         {
             var dir = Path.GetDirectoryName(LogPath)!;
@@ -53,5 +59,15 @@ internal static class SensorLogger
             File.AppendAllText(LogPath, $"{DateTime.Now:HH:mm:ss.fff} {msg}\n");
         }
         catch { /* ignore */ }
+    }
+
+    private static bool IsReleaseForceLogEnabled()
+    {
+        var value = Environment.GetEnvironmentVariable("SYSMONCMDPAL_ENABLE_SENSOR_LOG");
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        return value.Equals("1", StringComparison.OrdinalIgnoreCase) ||
+               value.Equals("true", StringComparison.OrdinalIgnoreCase);
     }
 }

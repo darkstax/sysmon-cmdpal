@@ -26,8 +26,7 @@ internal static class SystemPowerReader
         if (brokerSnap.IsFresh && brokerSnap.AllSensors.Count > 0)
         {
             double cpuPower = 0;
-            double gpuPower = 0;
-            var gpuParts = new System.Collections.Generic.List<string>();
+            var gpuByHardware = new System.Collections.Generic.Dictionary<int, double>();
 
             foreach (var s in brokerSnap.AllSensors)
             {
@@ -39,30 +38,38 @@ internal static class SystemPowerReader
                 }
                 else if (s.Tag == ShmLayout.TagGpuPower && s.Value > 0)
                 {
-                    // GPU：每个硬件取最大值（GPU Core/GPU Package 是总功率，GPU SoC 是子项）
-                    // 按 HardwareTag 区分不同 GPU，每个 GPU 只取一个最大功率
-                    string hwKey = s.HardwareTag.ToString();
+                    // GPU：每个硬件实例取最大值（GPU Core/GPU Package 是总功率，GPU SoC 是子项）
+                    // HardwareTag 低 8 位是硬件类型，高位是同类型实例 index。
                     // 只取 GPU Core / GPU Package（总功率），跳过 SoC 等子项
                     if (s.Name.Contains("Core", System.StringComparison.OrdinalIgnoreCase) ||
                         s.Name.Contains("Package", System.StringComparison.OrdinalIgnoreCase))
                     {
-                        gpuPower += s.Value;
-                        string hwName = s.HardwareTag switch
-                        {
-                            ShmLayout.HwGpuNvidia => "dGPU",
-                            ShmLayout.HwGpuAmd => "iGPU",
-                            _ => "GPU"
-                        };
-                        gpuParts.Add($"{hwName} {s.Value:F1}");
+                        if (!gpuByHardware.TryGetValue(s.HardwareTag, out double current) || s.Value > current)
+                            gpuByHardware[s.HardwareTag] = s.Value;
                     }
                 }
             }
 
             if (cpuPower > 0)
             {
+                double gpuPower = gpuByHardware.Values.Sum();
                 double total = cpuPower + gpuPower;
                 var detailParts = new System.Collections.Generic.List<string> { $"CPU {cpuPower:F1}" };
-                detailParts.AddRange(gpuParts);
+                foreach (var kvp in gpuByHardware.OrderBy(kvp => kvp.Key))
+                {
+                    int hwType = ShmLayout.HardwareTypeFromTag(kvp.Key);
+                    int hwInstance = ShmLayout.HardwareInstanceFromTag(kvp.Key);
+                    string hwName = hwType switch
+                    {
+                        ShmLayout.HwGpuNvidia => "dGPU",
+                        ShmLayout.HwGpuAmd => "AMD GPU",
+                        ShmLayout.HwGpuIntel => "iGPU",
+                        _ => "GPU"
+                    };
+                    if (hwInstance > 0)
+                        hwName = $"{hwName} #{hwInstance + 1}";
+                    detailParts.Add($"{hwName} {kvp.Value:F1}");
+                }
                 string detail = string.Join(" + ", detailParts);
                 return new SystemPowerResult(total, $"Broker ({detail})");
             }
