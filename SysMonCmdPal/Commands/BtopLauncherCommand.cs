@@ -42,6 +42,7 @@ internal sealed partial class BtopLauncherCommand : InvokableCommand
     {
         Id = "btop4win";
         Name = Loc.Get("Btop.Name");
+        Icon = new IconInfo(SysMonIcons.Terminal);
     }
 
     public override CommandResult Invoke()

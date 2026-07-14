@@ -140,7 +140,7 @@ internal sealed partial class MemoryDetailPage : RefreshingContentPage
 
     public MemoryDetailPage()
     {
-        Icon = new IconInfo("");
+        Icon = new IconInfo(SysMonIcons.Memory);
         Title = Loc.Get("Memory.PageTitle");
         Name = Loc.Get("Dock.Memory");
         Commands = [new CommandContextItem(_copyCommand) { Title = Loc.Get("Common.CopyCurrentMetrics") }];

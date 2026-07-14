@@ -21,7 +21,7 @@ internal sealed partial class DiskDetailPage : ListPage, IDisposable
 
     public DiskDetailPage()
     {
-        Icon = new IconInfo("");
+        Icon = new IconInfo(SysMonIcons.Disk);
         Title = Loc.Get("Disk.PageTitle");
         Name = Loc.Get("Dock.Disk");
     }
@@ -67,7 +67,7 @@ internal sealed partial class DiskDetailPage : ListPage, IDisposable
                 {
                     Title = disk.Model.ToUpper().Trim(),
                     Subtitle = $"{ioStr}{usedPct:F0}% 使用 · {partitions.Length} 分区 · {totalGB:F0} GB{(!string.IsNullOrEmpty(disk.InterfaceType) ? $" · {disk.InterfaceType}" : "")}",
-                    Icon = new IconInfo(usedPct > 90 ? "" : ""),
+                    Icon = new IconInfo(usedPct > 90 ? SysMonIcons.Warning : SysMonIcons.Disk),
                 };
                 SensorLogger.ForceLog($"[DiskDetailPage] item target=DiskPartitionsPage title={item.Title} subtitle={item.Subtitle}");
                 return item;
@@ -82,7 +82,7 @@ internal sealed partial class DiskDetailPage : ListPage, IDisposable
             {
                 Title = Loc.Get("Common.CopyCurrentMetrics"),
                 Subtitle = _copyCommand.Text,
-                Icon = new IconInfo(""),
+                Icon = new IconInfo(SysMonIcons.Copy),
             },
             .. items,
         ];
@@ -159,7 +159,7 @@ internal sealed partial class DiskDetailPage : ListPage, IDisposable
         {
             Title = $"{d.Name}{label}",
             Subtitle = Loc.Format("Disk.Subtitle", ioStr, $"{d.UsedPercent:F0}", $"{freeGB:F1}", $"{totalGB:F1}"),
-            Icon = new IconInfo(d.UsedPercent > 90 ? "" : ""),
+            Icon = new IconInfo(d.UsedPercent > 90 ? SysMonIcons.Warning : SysMonIcons.Disk),
         };
     }
 }
@@ -373,7 +373,7 @@ internal sealed partial class DiskPartitionsPage : RefreshingContentPage
     public DiskPartitionsPage(PhysicalDiskInfo disk)
     {
         _disk = disk;
-        Icon = new IconInfo("");
+        Icon = new IconInfo(SysMonIcons.Disk);
         Title = disk.Model.ToUpper().Trim();
         Name = disk.Model.ToUpper().Trim();
         _form.TemplateJson = Template;

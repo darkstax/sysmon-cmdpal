@@ -25,7 +25,7 @@ public partial class SysMonCommandsProvider : CommandProvider
     {
         Id = "SysMonCmdPal";
         DisplayName = Loc.Get("Provider.DisplayName");
-        Icon = new IconInfo(""); // LightningBolt
+        Icon = new IconInfo(SysMonIcons.App);
         Frozen = false;
 
         // M11: PrecisionMode 设置已移除 — 传感器回退链自动选择最优数据源

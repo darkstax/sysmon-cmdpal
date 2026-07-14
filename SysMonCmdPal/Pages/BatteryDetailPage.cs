@@ -266,7 +266,7 @@ internal sealed partial class BatteryDetailPage : RefreshingContentPage
 
     public BatteryDetailPage()
     {
-        Icon = new IconInfo("");
+        Icon = new IconInfo(SysMonIcons.Battery);
         Title = Loc.Get("Battery.PageTitle");
         Name = Loc.Get("Dock.Battery");
         _form.TemplateJson = Template;

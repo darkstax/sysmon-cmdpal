@@ -21,7 +21,7 @@ internal sealed partial class GpuDetailPage : ListPage, IDisposable
 
     public GpuDetailPage()
     {
-        Icon = new IconInfo("");
+        Icon = new IconInfo(SysMonIcons.Gpu);
         Title = Loc.Get("Gpu.PageTitle");
         Name = "GPU";
     }
@@ -40,7 +40,7 @@ internal sealed partial class GpuDetailPage : ListPage, IDisposable
                 {
                     Title = Loc.Get("Gpu.NotDetected"),
                     Subtitle = "无可用数据源",
-                    Icon = new IconInfo(""),
+                    Icon = new IconInfo(SysMonIcons.Gpu),
                 }
             ]);
         }
@@ -66,7 +66,7 @@ internal sealed partial class GpuDetailPage : ListPage, IDisposable
             {
                 Title = string.IsNullOrEmpty(gpu.Name) ? $"GPU {i + 1}" : gpu.Name,
                 Subtitle = $"{usageStr} · {tempStr} · {memStr}",
-                Icon = new IconInfo(""),
+                Icon = new IconInfo(SysMonIcons.Gpu),
             };
         }));
     }
@@ -79,7 +79,7 @@ internal sealed partial class GpuDetailPage : ListPage, IDisposable
             {
                 Title = Loc.Get("Common.CopyCurrentMetrics"),
                 Subtitle = _copyCommand.Text,
-                Icon = new IconInfo(""),
+                Icon = new IconInfo(SysMonIcons.Copy),
             },
             .. items,
         ];
@@ -320,7 +320,7 @@ internal sealed partial class GpuItemPage : RefreshingContentPage
         _usageChart = new SparklineChart(maxPoints: 34, metric: ChartMetric.Gpu);
         _memChart = new SparklineChart(maxPoints: 34, metric: ChartMetric.GpuMemory);
 
-        Icon = new IconInfo("");
+        Icon = new IconInfo(SysMonIcons.Gpu);
         Title = string.IsNullOrEmpty(gpu.Name) ? $"GPU {index + 1}" : gpu.Name;
         Name = Title;
         Commands = [new CommandContextItem(_copyCommand) { Title = Loc.Get("Common.CopyCurrentMetrics") }];

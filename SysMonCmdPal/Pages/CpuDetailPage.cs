@@ -174,7 +174,7 @@ internal sealed partial class CpuDetailPage : RefreshingContentPage
 
     public CpuDetailPage()
     {
-        Icon = new IconInfo("");
+        Icon = new IconInfo(SysMonIcons.Cpu);
         Title = Loc.Get("Cpu.PageTitle");
         Name = "CPU";
         Commands = [new CommandContextItem(_copyCommand) { Title = Loc.Get("Common.CopyCurrentMetrics") }];

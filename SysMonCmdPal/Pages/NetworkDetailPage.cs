@@ -146,7 +146,7 @@ internal sealed partial class NetworkDetailPage : RefreshingContentPage
 
     public NetworkDetailPage()
     {
-        Icon = new IconInfo("");
+        Icon = new IconInfo(SysMonIcons.Network);
         Title = Loc.Get("Network.PageTitle");
         Name = Loc.Get("MainPage.NetworkTitle");
         Commands = [new CommandContextItem(_copyCommand) { Title = Loc.Get("Common.CopyCurrentMetrics") }];

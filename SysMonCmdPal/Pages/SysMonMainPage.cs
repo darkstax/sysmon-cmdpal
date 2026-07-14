@@ -30,7 +30,7 @@ internal sealed partial class SysMonMainPage : ListPage
 
     public SysMonMainPage()
     {
-        Icon = new IconInfo("");       // LightningBolt
+        Icon = new IconInfo(SysMonIcons.App);
         Title = Loc.Get("MainPage.Title");
         Name = "Open";
         // P2: 不再需要 preWarmTimer — 详情页在 GetContent() 时自动订阅 DockBandRefreshCoordinator
@@ -50,25 +50,25 @@ internal sealed partial class SysMonMainPage : ListPage
                         ? Loc.Format("MainPage.CpuSubtitleTemp", $"{info.CpuTemperature:F0}", Environment.ProcessorCount)
                         : Loc.Format("MainPage.CpuSubtitleNoTemp", Environment.ProcessorCount))
                     : GetNamedCpuSubtitle(info),
-                Icon = new IconInfo(""),
+                Icon = new IconInfo(SysMonIcons.Cpu),
             },
             new ListItem(_memPage)
             {
                 Title = Loc.Format("MainPage.MemoryTitle", $"{info.MemoryUsed:F0}"),
                 Subtitle = $"{(info.MemoryUsedBytes / (1024.0 * 1024 * 1024)):F1} / {(info.MemoryTotalBytes / (1024.0 * 1024 * 1024)):F1} GB",
-                Icon = new IconInfo(""),
+                Icon = new IconInfo(SysMonIcons.Memory),
             },
             new ListItem(_diskPage)
             {
                 Title = Loc.Format("MainPage.DiskTitle", GetDiskCount(info)),
                 Subtitle = GetDiskSubtitle(info),
-                Icon = new IconInfo(""),
+                Icon = new IconInfo(SysMonIcons.Disk),
             },
             new ListItem(_netPage)
             {
                 Title = Loc.Get("MainPage.NetworkTitle"),
                 Subtitle = $"↓ {DockFormat.Speed(info.NetDown)}  ↑ {DockFormat.Speed(info.NetUp)}",
-                Icon = new IconInfo(""),
+                Icon = new IconInfo(SysMonIcons.Network),
             },
             new ListItem(_batPage)
             {
@@ -76,7 +76,7 @@ internal sealed partial class SysMonMainPage : ListPage
                     ? Loc.Format("MainPage.BatteryTitle", $"{info.BatteryPercent:F0}", DockFormat.BatteryStatusText(info.BatteryStatus))
                     : Loc.Get("MainPage.BatteryUnavailable"),
                 Subtitle = Loc.Get("MainPage.BatterySubtitle"),
-                Icon = new IconInfo(""),
+                Icon = new IconInfo(SysMonIcons.Battery),
             },
             new ListItem(_gpuPage)
             {
@@ -91,25 +91,25 @@ internal sealed partial class SysMonMainPage : ListPage
                     : (info.CpuTemperature >= 0
                         ? Loc.Format("MainPage.GpuSubtitleBackend", BackendStatusText(info.Backend))
                         : ""),
-                Icon = new IconInfo(""),
+                Icon = new IconInfo(SysMonIcons.Gpu),
             },
             new ListItem(_sensorPage)
             {
                 Title = Loc.Get("MainPage.SensorListTitle"),
                 Subtitle = GetSensorSubtitle(),
-                Icon = new IconInfo(""),
+                Icon = new IconInfo(SysMonIcons.Sensors),
             },
             new ListItem(_brokerDiagnosticsPage)
             {
                 Title = Loc.Get("MainPage.BrokerDiagnosticsTitle"),
                 Subtitle = GetBrokerDiagnosticsSubtitle(),
-                Icon = new IconInfo(""),
+                Icon = new IconInfo(SysMonIcons.Diagnostics),
             },
             new ListItem(_btopCmd)
             {
                 Title = Loc.Get("MainPage.BtopTitle"),
                 Subtitle = Loc.Get("MainPage.BtopSubtitle"),
-                Icon = new IconInfo(""),
+                Icon = new IconInfo(SysMonIcons.Terminal),
             },
         ];
     }
