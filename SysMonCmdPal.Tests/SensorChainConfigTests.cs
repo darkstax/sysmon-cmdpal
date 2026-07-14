@@ -185,4 +185,23 @@ public class SensorChainConfigTests
             Assert.Equal(PrecisionMode.None, roundTripped.PrecisionMode);
         });
     }
+
+    [Fact]
+    public void Save_PreservesUnrelatedSettingsKeys()
+    {
+        WithTempConfig(tempPath =>
+        {
+            File.WriteAllText(tempPath, @"{""version"":""3"",""precisionModeStr"":""Broker"",""btopPath"":""C:\\tools\\btop.exe""}");
+
+            var loaded = SensorChainConfig.Load();
+            loaded.PrecisionMode = PrecisionMode.None;
+            loaded.Save();
+
+            using var doc = JsonDocument.Parse(File.ReadAllText(tempPath));
+            var root = doc.RootElement;
+
+            Assert.Equal("None", root.GetProperty("precisionModeStr").GetString());
+            Assert.Equal("C:\\tools\\btop.exe", root.GetProperty("btopPath").GetString());
+        });
+    }
 }

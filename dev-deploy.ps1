@@ -12,6 +12,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 $ProjectRoot = $PSScriptRoot
 $PackageName = "darkstax.SysPulseforCommandPalette"
 $BuildOutputDir = Join-Path $ProjectRoot "SysMonCmdPal\bin\x64\Debug\net10.0-windows10.0.26100.0\win-x64"

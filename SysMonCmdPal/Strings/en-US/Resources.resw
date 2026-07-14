@@ -48,6 +48,15 @@
   <data name="Common.CopyCurrentMetrics" xml:space="preserve">
     <value>Copy current metrics</value>
   </data>
+  <data name="Common.Yes" xml:space="preserve">
+    <value>Yes</value>
+  </data>
+  <data name="Common.No" xml:space="preserve">
+    <value>No</value>
+  </data>
+  <data name="Common.None" xml:space="preserve">
+    <value>None</value>
+  </data>
 
   <!-- ==================== Backend status ==================== -->
   <data name="Backend.Broker" xml:space="preserve">
@@ -117,17 +126,16 @@
   <data name="Provider.Subtitle" xml:space="preserve">
     <value>CPU · Memory · Disk · Network · Battery · GPU · Sensors · btop4win</value>
   </data>
-  <data name="Provider.PrecisionModeLabel" xml:space="preserve">
-    <value>High-precision temperature source</value>
+
+  <!-- ==================== Settings ==================== -->
+  <data name="Settings.BtopPathLabel" xml:space="preserve">
+    <value>btop4win path</value>
   </data>
-  <data name="Provider.PrecisionModeDescription" xml:space="preserve">
-    <value>Select CPU temperature data source precision. Broker requires SysMonBroker running in the background.</value>
+  <data name="Settings.BtopPathDescription" xml:space="preserve">
+    <value>Optional path to btop.exe, btop4win.exe, or an install directory. Leave empty to use Scoop, PATH, and Program Files.</value>
   </data>
-  <data name="Provider.PrecisionChoiceBroker" xml:space="preserve">
-    <value>Broker (most accurate)</value>
-  </data>
-  <data name="Provider.PrecisionChoiceNone" xml:space="preserve">
-    <value>None (ACPI only)</value>
+  <data name="Settings.BtopPathPlaceholder" xml:space="preserve">
+    <value>C:\tools\btop4win\btop.exe</value>
   </data>
 
   <!-- ==================== MainPage ==================== -->
@@ -193,6 +201,21 @@
   </data>
   <data name="MainPage.SensorSubtitleDisconnected" xml:space="preserve">
     <value>Requires SysMonBroker running</value>
+  </data>
+  <data name="MainPage.BrokerDiagnosticsTitle" xml:space="preserve">
+    <value>Broker diagnostics</value>
+  </data>
+  <data name="MainPage.BrokerDiagnosticsConnected" xml:space="preserve">
+    <value>Connected · {0} sensors</value>
+  </data>
+  <data name="MainPage.BrokerDiagnosticsNotRunning" xml:space="preserve">
+    <value>SysMonBroker process is not running</value>
+  </data>
+  <data name="MainPage.BrokerDiagnosticsShmUnavailable" xml:space="preserve">
+    <value>Process running · shared memory unavailable</value>
+  </data>
+  <data name="MainPage.BrokerDiagnosticsStale" xml:space="preserve">
+    <value>Shared memory connected · data stale</value>
   </data>
   <data name="MainPage.BtopTitle" xml:space="preserve">
     <value>Launch btop4win</value>
@@ -342,11 +365,76 @@ No battery detected (desktop or virtual machine).</value>
   <data name="Sensor.ItemTitle" xml:space="preserve">
     <value>{0}: {1}</value>
   </data>
+  <data name="Sensor.AddDockBand" xml:space="preserve">
+    <value>Add to Dock Band</value>
+  </data>
+  <data name="Sensor.RemoveDockBand" xml:space="preserve">
+    <value>Remove from Dock Band</value>
+  </data>
+  <data name="Sensor.DockBandAdded" xml:space="preserve">
+    <value>Added custom sensor Dock Band</value>
+  </data>
+  <data name="Sensor.DockBandRemoved" xml:space="preserve">
+    <value>Removed custom sensor Dock Band</value>
+  </data>
+  <data name="Sensor.DockBandAlreadyAdded" xml:space="preserve">
+    <value>Already added to Dock Band</value>
+  </data>
+  <data name="Sensor.DockBandNotConfigured" xml:space="preserve">
+    <value>Sensor Dock Band is not configured</value>
+  </data>
   <data name="Sensor.NoOpTitle" xml:space="preserve">
     <value>Sensor</value>
   </data>
   <data name="Sensor.NoOpContent" xml:space="preserve">
     <value>*Select a sensor category to view details.*</value>
+  </data>
+
+  <!-- ==================== Broker diagnostics page ==================== -->
+  <data name="BrokerDiagnostics.PageTitle" xml:space="preserve">
+    <value>Broker diagnostics</value>
+  </data>
+  <data name="BrokerDiagnostics.CopyDiagnostics" xml:space="preserve">
+    <value>Copy diagnostics</value>
+  </data>
+  <data name="BrokerDiagnostics.ProcessRunning" xml:space="preserve">
+    <value>Process running</value>
+  </data>
+  <data name="BrokerDiagnostics.ProcessId" xml:space="preserve">
+    <value>Process ID</value>
+  </data>
+  <data name="BrokerDiagnostics.SharedMemoryConnected" xml:space="preserve">
+    <value>Shared memory connected</value>
+  </data>
+  <data name="BrokerDiagnostics.BrokerAlive" xml:space="preserve">
+    <value>Broker alive</value>
+  </data>
+  <data name="BrokerDiagnostics.DataFresh" xml:space="preserve">
+    <value>Data fresh</value>
+  </data>
+  <data name="BrokerDiagnostics.Version" xml:space="preserve">
+    <value>SHM version</value>
+  </data>
+  <data name="BrokerDiagnostics.Counter" xml:space="preserve">
+    <value>Counter</value>
+  </data>
+  <data name="BrokerDiagnostics.SensorCount" xml:space="preserve">
+    <value>Sensor count</value>
+  </data>
+  <data name="BrokerDiagnostics.GpuCount" xml:space="preserve">
+    <value>GPU count</value>
+  </data>
+  <data name="BrokerDiagnostics.LastRead" xml:space="preserve">
+    <value>Last SHM read</value>
+  </data>
+  <data name="BrokerDiagnostics.LastPush" xml:space="preserve">
+    <value>Last snapshot push</value>
+  </data>
+  <data name="BrokerDiagnostics.LastPing" xml:space="preserve">
+    <value>Last ping</value>
+  </data>
+  <data name="BrokerDiagnostics.LastError" xml:space="preserve">
+    <value>Last error</value>
   </data>
 
   <!-- ==================== Btop launcher ==================== -->
@@ -434,6 +522,21 @@ No battery detected (desktop or virtual machine).</value>
   </data>
   <data name="Dock.GpuTitleNoTemp" xml:space="preserve">
     <value>GPU {0}</value>
+  </data>
+  <data name="Dock.CustomSensorTitle" xml:space="preserve">
+    <value>{0} {1}</value>
+  </data>
+  <data name="Dock.CustomSensorSubtitle" xml:space="preserve">
+    <value>{0} - {1}</value>
+  </data>
+  <data name="Dock.CustomSensorWaiting" xml:space="preserve">
+    <value>Waiting for Broker sensor data</value>
+  </data>
+  <data name="Dock.CustomSensorUnavailable" xml:space="preserve">
+    <value>Sensor data unavailable</value>
+  </data>
+  <data name="Dock.CustomSensorNotFound" xml:space="preserve">
+    <value>Sensor not found: {0}</value>
   </data>
 
   <!-- ==================== Sensor category tags (ShmLayout.TagName) ==================== -->

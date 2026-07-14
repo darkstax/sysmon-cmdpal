@@ -4,6 +4,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.CommandPalette.Extensions;
 using Microsoft.CommandPalette.Extensions.Toolkit;
 
@@ -79,65 +80,74 @@ internal sealed partial class BtopLauncherCommand : InvokableCommand
 
     private static string? FindBtopExe()
     {
-        foreach (var path in GetConfiguredBtopCandidates())
-        {
-            if (IsExistingBtopExe(path)) return path;
-        }
-
-        // 2. 检查 scoop 常见路径
-        foreach (var path in ScoopPaths)
-        {
-            if (File.Exists(path)) return path;
-        }
-
-        // 3. 搜索 PATH 环境变量
+        var settingsPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "SysMonCmdPal",
+            "settings.json");
         var pathDirs = Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator) ?? [];
+
+        return FindBtopExe(settingsPath, ScoopPaths, pathDirs, ProgramFilesPaths, File.Exists, Directory.Exists);
+    }
+
+    internal static string? FindBtopExe(
+        string settingsPath,
+        IEnumerable<string> scoopPaths,
+        IEnumerable<string> pathDirs,
+        IEnumerable<string> programFilesPaths,
+        Func<string, bool> fileExists,
+        Func<string, bool> directoryExists)
+    {
+        foreach (var path in GetConfiguredBtopCandidates(settingsPath, fileExists, directoryExists))
+        {
+            if (IsExistingBtopExe(path, fileExists)) return path;
+        }
+
+        foreach (var path in scoopPaths)
+        {
+            if (IsExistingBtopExe(path, fileExists)) return path;
+        }
+
         foreach (var dir in pathDirs)
         {
             foreach (var name in ExeNames)
             {
                 var full = Path.Combine(dir.Trim(), name);
-                if (File.Exists(full)) return full;
+                if (IsExistingBtopExe(full, fileExists)) return full;
             }
         }
 
-        // 4. 检查 Program Files 常见路径
-        foreach (var path in ProgramFilesPaths)
+        foreach (var path in programFilesPaths)
         {
-            if (File.Exists(path)) return path;
+            if (IsExistingBtopExe(path, fileExists)) return path;
         }
 
         return null;
     }
 
-    private static IEnumerable<string> GetConfiguredBtopCandidates()
+    internal static IEnumerable<string> GetConfiguredBtopCandidates(
+        string settingsPath,
+        Func<string, bool> fileExists,
+        Func<string, bool> directoryExists)
     {
-        var settingsPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "SysMonCmdPal",
-            "settings.json");
-
-        if (!File.Exists(settingsPath))
+        if (!fileExists(settingsPath))
             return [];
 
         try
         {
-            using var doc = JsonDocument.Parse(File.ReadAllText(settingsPath));
-            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            if (JsonNode.Parse(File.ReadAllText(settingsPath)) is not JsonObject root)
                 return [];
 
             var candidates = new List<string>();
             foreach (var propertyName in new[] { "btopPath", "btopExePath", "customBtopPath", "btopCustomPath" })
             {
-                if (!doc.RootElement.TryGetProperty(propertyName, out var property) || property.ValueKind != JsonValueKind.String)
+                if (root[propertyName] is not JsonValue property || property.TryGetValue<string>(out var rawPath) == false)
                     continue;
 
-                var rawPath = property.GetString();
                 if (string.IsNullOrWhiteSpace(rawPath))
                     continue;
 
                 var candidate = rawPath.Trim();
-                if (Path.EndsInDirectorySeparator(candidate) || Directory.Exists(candidate))
+                if (Path.EndsInDirectorySeparator(candidate) || directoryExists(candidate))
                 {
                     foreach (var exeName in ExeNames)
                         candidates.Add(Path.Combine(candidate, exeName));
@@ -157,9 +167,11 @@ internal sealed partial class BtopLauncherCommand : InvokableCommand
         }
     }
 
-    private static bool IsExistingBtopExe(string path)
+    private static bool IsExistingBtopExe(string path) => IsExistingBtopExe(path, File.Exists);
+
+    private static bool IsExistingBtopExe(string path, Func<string, bool> fileExists)
     {
-        if (!File.Exists(path))
+        if (!fileExists(path))
             return false;
 
         var fileName = Path.GetFileName(path);

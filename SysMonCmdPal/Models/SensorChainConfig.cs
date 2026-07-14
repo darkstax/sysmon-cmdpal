@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 namespace SysMonCmdPal;
@@ -85,8 +86,20 @@ public sealed class SensorChainConfig
         {
             var dir = Path.GetDirectoryName(ConfigPath)!;
             Directory.CreateDirectory(dir);
+
+            var current = File.Exists(ConfigPath) &&
+                JsonNode.Parse(File.ReadAllText(ConfigPath)) is JsonObject existing
+                    ? existing
+                    : [];
+
             var json = JsonSerializer.Serialize(this, ConfigJsonContext.Default.SensorChainConfig);
-            File.WriteAllText(ConfigPath, json);
+            if (JsonNode.Parse(json) is JsonObject serialized)
+            {
+                foreach (var item in serialized)
+                    current[item.Key] = item.Value is not null ? item.Value.DeepClone() : null;
+            }
+
+            File.WriteAllText(ConfigPath, current.ToJsonString(ConfigJsonContext.Default.Options));
         }
         catch (Exception ex)
         {

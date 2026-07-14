@@ -26,7 +26,7 @@ internal sealed partial class SensorListPage : ListPage
     public override IListItem[] GetItems()
     {
         var snap = BrokerPushReceiver.Instance.Snapshot;
-        if (!snap.IsFresh || snap.AllSensors.Count == 0)
+        if (!(snap.IsAlive && snap.IsFresh) || snap.AllSensors.Count == 0)
         {
             return CreateNoDataItems(snap);
         }
@@ -101,25 +101,47 @@ internal sealed partial class SensorListPage : ListPage
 
     internal static IListItem[] CreateSensorItems(IEnumerable<BrokerSensorEntry> sensors)
     {
+        var dockedKeys = SensorDockSettings.Load();
         return sensors
             .GroupBy(sensor => sensor.Tag)
             .OrderBy(group => group.Key)
             .SelectMany(group => group.OrderBy(sensor => sensor.Name))
-            .Select(CreateSensorItem)
+            .Select(sensor => CreateSensorItem(sensor, dockedKeys))
             .ToArray();
     }
 
     internal static IListItem CreateSensorItem(BrokerSensorEntry sensor)
+        => CreateSensorItem(sensor, SensorDockSettings.Load());
+
+    private static IListItem CreateSensorItem(
+        BrokerSensorEntry sensor,
+        IReadOnlyList<SensorDockKey> dockedKeys)
     {
         string categoryName = ShmLayout.TagName(sensor.Tag);
         string valueStr = FormatSensorValue(sensor.Value, sensor.Unit);
+        var dockKey = SensorDockKey.FromSensor(sensor);
+        var isDocked = dockKey.IsValid && dockedKeys.Contains(dockKey, SensorDockKeyComparer.Instance);
 
-        return new ListItem(NoOpPage.Instance)
+        var item = new ListItem(dockKey.IsValid
+            ? new SensorDockCommand(dockKey, isDocked ? SensorDockCommandMode.AlreadyAdded : SensorDockCommandMode.Add)
+            : NoOpPage.Instance)
         {
             Title = Loc.Format("Sensor.ItemTitle", categoryName, sensor.Name),
             Subtitle = valueStr,
             Icon = new IconInfo(GetCategoryIcon(sensor.Tag)),
         };
+
+        if (dockKey.IsValid)
+        {
+            item.MoreCommands =
+            [
+                new CommandContextItem(new SensorDockCommand(
+                    dockKey,
+                    isDocked ? SensorDockCommandMode.Remove : SensorDockCommandMode.Add))
+            ];
+        }
+
+        return item;
     }
 
     internal static string FormatSensorValue(double value, string unit)
@@ -168,7 +190,7 @@ internal sealed partial class SensorCategoryPage : ListPage
     public override IListItem[] GetItems()
     {
         var snap = BrokerPushReceiver.Instance.Snapshot;
-        if (!snap.IsFresh || snap.AllSensors.Count == 0)
+        if (!(snap.IsAlive && snap.IsFresh) || snap.AllSensors.Count == 0)
         {
             return SensorListPage.CreateNoDataItems(snap);
         }

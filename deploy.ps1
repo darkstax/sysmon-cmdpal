@@ -17,6 +17,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 $ProjectRoot = $PSScriptRoot
 $PackageName = "darkstax.SysPulseforCommandPalette"
 
@@ -347,13 +349,24 @@ function Deploy-Broker {
     Log "计划任务已注册: 登录时自动启动 (最高权限, User=$principalUser)"
 
     Start-ScheduledTask -TaskName $TaskName
-    Start-Sleep -Seconds 3
 
-    $proc = Get-Process SysMonBroker -ErrorAction SilentlyContinue
+    $proc = $null
+    for ($i = 0; $i -lt 15; $i++) {
+        Start-Sleep -Seconds 1
+        $proc = Get-Process SysMonBroker -ErrorAction SilentlyContinue
+        if ($proc) { break }
+    }
+
     if ($proc) {
         Log "Broker 运行中: PID $($proc.Id)"
     } else {
         Log "NOTE: Broker 进程未检测到 — 可能 PawnIO 驱动未安装或传感器初始化失败"
+        try {
+            $taskInfo = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop
+            Log "  LastTaskResult=$($taskInfo.LastTaskResult) LastRunTime=$($taskInfo.LastRunTime)"
+        } catch {
+            Log "  计划任务运行信息不可用: $($_.Exception.Message)"
+        }
         Log "  Broker 缺席时扩展会自动使用用户态回退链"
     }
 }

@@ -25,6 +25,7 @@ internal sealed partial class SysMonMainPage : ListPage
     private readonly BatteryDetailPage _batPage = new();
     private readonly GpuDetailPage _gpuPage = new();
     private readonly SensorListPage _sensorPage = new();
+    private readonly BrokerDiagnosticsPage _brokerDiagnosticsPage = new();
     private readonly BtopLauncherCommand _btopCmd = new();
 
     public SysMonMainPage()
@@ -48,7 +49,7 @@ internal sealed partial class SysMonMainPage : ListPage
                     ? (info.CpuTemperature >= 0
                         ? Loc.Format("MainPage.CpuSubtitleTemp", $"{info.CpuTemperature:F0}", Environment.ProcessorCount)
                         : Loc.Format("MainPage.CpuSubtitleNoTemp", Environment.ProcessorCount))
-                    : $"{SystemInfoService.CpuName.ToUpper().Trim()} · {(info.CpuTemperature >= 0 ? $"{info.CpuTemperature:F0}°C · " : "")}{Environment.ProcessorCount} 核心",
+                    : GetNamedCpuSubtitle(info),
                 Icon = new IconInfo(""),
             },
             new ListItem(_memPage)
@@ -98,6 +99,12 @@ internal sealed partial class SysMonMainPage : ListPage
                 Subtitle = GetSensorSubtitle(),
                 Icon = new IconInfo(""),
             },
+            new ListItem(_brokerDiagnosticsPage)
+            {
+                Title = Loc.Get("MainPage.BrokerDiagnosticsTitle"),
+                Subtitle = GetBrokerDiagnosticsSubtitle(),
+                Icon = new IconInfo(""),
+            },
             new ListItem(_btopCmd)
             {
                 Title = Loc.Get("MainPage.BtopTitle"),
@@ -115,6 +122,16 @@ internal sealed partial class SysMonMainPage : ListPage
         SensorBackend.None => Loc.Get("Backend.None"),
         _ => Loc.Get("Backend.Unknown"),
     };
+
+    private static string GetNamedCpuSubtitle(SystemSnapshot info)
+    {
+        string cpuName = SystemInfoService.CpuName.ToUpperInvariant().Trim();
+        string details = info.CpuTemperature >= 0
+            ? Loc.Format("MainPage.CpuSubtitleTemp", $"{info.CpuTemperature:F0}", Environment.ProcessorCount)
+            : Loc.Format("MainPage.CpuSubtitleNoTemp", Environment.ProcessorCount);
+
+        return $"{cpuName} · {details}";
+    }
 
     private static string GetSensorSubtitle()
     {
@@ -138,6 +155,24 @@ internal sealed partial class SysMonMainPage : ListPage
             return Loc.Format("MainPage.SensorSubtitleError", diag.LastError);
 
         return Loc.Get("MainPage.SensorSubtitleUnavailable");
+    }
+
+    private static string GetBrokerDiagnosticsSubtitle()
+    {
+        var snap = BrokerPushReceiver.Instance.Snapshot;
+        var diag = SharedMemoryReader.Diagnostics;
+        int pid = BrokerDetector.GetBrokerPid();
+
+        if (pid <= 0)
+            return Loc.Get("MainPage.BrokerDiagnosticsNotRunning");
+
+        if (!diag.IsConnected)
+            return Loc.Get("MainPage.BrokerDiagnosticsShmUnavailable");
+
+        if (!snap.IsFresh)
+            return Loc.Get("MainPage.BrokerDiagnosticsStale");
+
+        return Loc.Format("MainPage.BrokerDiagnosticsConnected", diag.LastSensorCount);
     }
 
     private static int GetDiskCount(SystemSnapshot info) =>

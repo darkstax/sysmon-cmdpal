@@ -11,6 +11,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -107,6 +108,16 @@ public sealed class SharedMemoryReader : IDisposable
                 // 复用 buffer — 只拷贝实际需要的数据
                 _accessor.ReadArray(0, _buffer, 0, MapSize);
                 ParseSnapshot(_buffer);
+            }
+            catch (FileNotFoundException)
+            {
+                // Broker has not created the global map yet; this is a normal
+                // unavailable state, not a user-facing read error.
+                _accessor?.Dispose();
+                _mmf?.Dispose();
+                _accessor = null;
+                _mmf = null;
+                UpdateDiagnostics(connected: false, error: "");
             }
             catch (Exception ex)
             {
