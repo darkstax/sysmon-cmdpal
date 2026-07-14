@@ -19,6 +19,7 @@ public partial class SysMonCommandsProvider : CommandProvider
     private SensorDockKey[] _configuredSensorBands = [];
 
     private readonly SysMonSettingsManager _settingsManager;
+    private readonly SysMonMainPage _rootPage;
     private readonly ICommandItem _rootCommand;
 
     public SysMonCommandsProvider()
@@ -31,9 +32,10 @@ public partial class SysMonCommandsProvider : CommandProvider
         // M11: PrecisionMode 设置已移除 — 传感器回退链自动选择最优数据源
         // (Broker → HWiNFO → ThermalZone)，无需用户手动切换。
         _settingsManager = new SysMonSettingsManager();
-        Settings = _settingsManager.Settings;
+        Settings = _settingsManager;
 
-        _rootCommand = new CommandItem(new SysMonMainPage())
+        _rootPage = new SysMonMainPage();
+        _rootCommand = new CommandItem(_rootPage)
         {
             Title = Loc.Get("Provider.Title"),
             Subtitle = Loc.Get("Provider.Subtitle"),
@@ -43,10 +45,10 @@ public partial class SysMonCommandsProvider : CommandProvider
             new CpuDockBand(),
             new MemoryDockBand(),
             new DiskDockBand(),
+            new GpuDockBand(),
             new NetworkDownDockBand(),
             new NetworkUpDockBand(),
             new BatteryDockBand(),
-            new GpuDockBand(),
         ];
 
         ReloadSensorDockBands(raiseItemsChanged: false);
@@ -84,6 +86,7 @@ public partial class SysMonCommandsProvider : CommandProvider
     public override void Dispose()
     {
         SensorDockSettings.Changed -= OnSensorDockSettingsChanged;
+        _rootPage.Dispose();
         ReleaseSensorDockBands();
         DockBandRefreshCoordinator.Shutdown();
         base.Dispose();

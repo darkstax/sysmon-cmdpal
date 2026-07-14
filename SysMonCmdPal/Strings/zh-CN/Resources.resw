@@ -48,6 +48,9 @@
   <data name="Common.CopyCurrentMetrics" xml:space="preserve">
     <value>复制当前指标</value>
   </data>
+  <data name="Common.Back" xml:space="preserve">
+    <value>返回</value>
+  </data>
   <data name="Common.Yes" xml:space="preserve">
     <value>是</value>
   </data>
@@ -124,7 +127,7 @@
     <value>系统监控</value>
   </data>
   <data name="Provider.Subtitle" xml:space="preserve">
-    <value>CPU · 内存 · 磁盘 · 网络 · 电池 · GPU · 传感器 · btop4win</value>
+    <value>CPU · 内存 · 磁盘 · GPU · 网络 · 电池 · 传感器 · btop4win</value>
   </data>
 
   <!-- ==================== Settings ==================== -->
@@ -136,6 +139,141 @@
   </data>
   <data name="Settings.BtopPathPlaceholder" xml:space="preserve">
     <value>C:\tools\btop4win\btop.exe</value>
+  </data>
+  <data name="Settings.PageTitle" xml:space="preserve">
+    <value>系统监控设置</value>
+  </data>
+  <data name="BrokerInstall.Title" xml:space="preserve">
+    <value>可选的提权 Broker</value>
+  </data>
+  <data name="BrokerInstall.Description" xml:space="preserve">
+    <value>只有确认后才会开始下载。SysMonCmdPal 会验证匹配架构的 GitHub Release 可执行文件，然后经一次管理员批准执行受保护、可恢复的安装。</value>
+  </data>
+  <data name="BrokerInstall.UnknownArchitecture" xml:space="preserve">
+    <value>不支持的架构</value>
+  </data>
+  <data name="BrokerInstall.ConfirmTitle" xml:space="preserve">
+    <value>从 GitHub 安装 SysMonBroker？</value>
+  </data>
+  <data name="BrokerInstall.ConfirmDescription" xml:space="preserve">
+    <value>仅从本项目的 GitHub Releases 下载 {0} Broker。验证完成后，Windows 会请求管理员批准，将 Broker 安装到 Program Files，并注册一个在任意用户登录时触发、以 SYSTEM 最高权限运行的任务。仅在你信任 darkstax/sysmon-cmdpal 发布内容时继续。</value>
+  </data>
+  <data name="BrokerInstall.ConfirmAction" xml:space="preserve">
+    <value>下载并安装</value>
+  </data>
+  <data name="BrokerInstall.Started" xml:space="preserve">
+    <value>Broker 安装已开始，可在设置中查看进度。</value>
+  </data>
+  <data name="BrokerInstall.AlreadyRunning" xml:space="preserve">
+    <value>已有 Broker 安装或卸载正在进行。</value>
+  </data>
+  <data name="BrokerInstall.ButtonInstall" xml:space="preserve">
+    <value>从 GitHub 安装 Broker</value>
+  </data>
+  <data name="BrokerInstall.ButtonUpdate" xml:space="preserve">
+    <value>更新或重新安装 Broker</value>
+  </data>
+  <data name="BrokerInstall.ButtonRetry" xml:space="preserve">
+    <value>重试 Broker 安装</value>
+  </data>
+  <data name="BrokerInstall.ButtonChecking" xml:space="preserve">
+    <value>正在检查 GitHub...</value>
+  </data>
+  <data name="BrokerInstall.ButtonDownloading" xml:space="preserve">
+    <value>正在下载 Broker...</value>
+  </data>
+  <data name="BrokerInstall.ButtonAwaitingElevation" xml:space="preserve">
+    <value>正在等待批准...</value>
+  </data>
+  <data name="BrokerInstall.ButtonInstalling" xml:space="preserve">
+    <value>正在安装 Broker...</value>
+  </data>
+  <data name="BrokerInstall.StatusNotInstalled" xml:space="preserve">
+    <value>状态：Broker 尚未安装。</value>
+  </data>
+  <data name="BrokerInstall.StatusInstalled" xml:space="preserve">
+    <value>状态：Broker 已安装。可使用按钮检查最新 Release 并重新安装。</value>
+  </data>
+  <data name="BrokerInstall.StatusChecking" xml:space="preserve">
+    <value>状态：正在检查适合当前架构的最新 GitHub Release。</value>
+  </data>
+  <data name="BrokerInstall.StatusDownloading" xml:space="preserve">
+    <value>状态：正在下载并验证 Broker 可执行文件。</value>
+  </data>
+  <data name="BrokerInstall.StatusAwaitingElevation" xml:space="preserve">
+    <value>状态：正在等待 Windows 管理员批准提示。</value>
+  </data>
+  <data name="BrokerInstall.StatusInstalling" xml:space="preserve">
+    <value>状态：正在写入受保护目录、注册 SYSTEM 任务并校验启动后的进程路径。</value>
+  </data>
+  <data name="BrokerInstall.StatusSucceeded" xml:space="preserve">
+    <value>状态：Broker 已安装，已为所有用户登录注册任务，并从受保护路径成功启动。</value>
+  </data>
+  <data name="BrokerInstall.FailureNetwork" xml:space="preserve">
+    <value>安装已停止：无法连接 GitHub。请检查网络后重试。</value>
+  </data>
+  <data name="BrokerInstall.FailureNoRelease" xml:space="preserve">
+    <value>安装已停止：本项目尚未发布 Broker Release。</value>
+  </data>
+  <data name="BrokerInstall.FailureNoCompatibleAsset" xml:space="preserve">
+    <value>安装已停止：最新 Release 中没有适合当前架构的 Broker 可执行文件。</value>
+  </data>
+  <data name="BrokerInstall.FailureDownloadInvalid" xml:space="preserve">
+    <value>安装已停止：下载的资产未通过验证。</value>
+  </data>
+  <data name="BrokerInstall.FailureUnsupportedArchitecture" xml:space="preserve">
+    <value>安装已停止：Broker 安装仅支持 x64 和 ARM64 Windows。</value>
+  </data>
+  <data name="BrokerInstall.FailureElevationCanceled" xml:space="preserve">
+    <value>安装已取消：未获得管理员批准。</value>
+  </data>
+  <data name="BrokerInstall.FailureInstallationFailed" xml:space="preserve">
+    <value>提权安装步骤失败或超时；如原有受管可执行文件与任务存在，安装程序会尽力恢复。</value>
+  </data>
+  <data name="BrokerInstall.FailureUnexpected" xml:space="preserve">
+    <value>安装意外失败。请重试或查看本地诊断日志。</value>
+  </data>
+  <data name="BrokerUninstall.ConfirmTitle" xml:space="preserve">
+    <value>卸载 SysMonBroker？</value>
+  </data>
+  <data name="BrokerUninstall.ConfirmDescription" xml:space="preserve">
+    <value>此操作会删除受管 SYSTEM 任务、Broker 可执行文件、卸载脚本、Broker 日志和 Windows 已安装应用项。如果任务 action 已不再指向受保护的 Broker 路径，卸载会拒绝删除该任务。此操作需要管理员批准。</value>
+  </data>
+  <data name="BrokerUninstall.ConfirmAction" xml:space="preserve">
+    <value>卸载 Broker</value>
+  </data>
+  <data name="BrokerUninstall.Started" xml:space="preserve">
+    <value>Broker 卸载已开始，可在设置中查看进度。</value>
+  </data>
+  <data name="BrokerUninstall.NotInstalled" xml:space="preserve">
+    <value>Broker 尚未安装。</value>
+  </data>
+  <data name="BrokerUninstall.ButtonUninstall" xml:space="preserve">
+    <value>卸载 Broker</value>
+  </data>
+  <data name="BrokerUninstall.ButtonAwaitingElevation" xml:space="preserve">
+    <value>正在等待卸载批准...</value>
+  </data>
+  <data name="BrokerUninstall.ButtonUninstalling" xml:space="preserve">
+    <value>正在卸载 Broker...</value>
+  </data>
+  <data name="BrokerUninstall.StatusAwaitingElevation" xml:space="preserve">
+    <value>状态：正在等待管理员批准卸载 Broker。</value>
+  </data>
+  <data name="BrokerUninstall.StatusUninstalling" xml:space="preserve">
+    <value>状态：正在校验并删除受管 Broker 安装。</value>
+  </data>
+  <data name="BrokerUninstall.StatusSucceeded" xml:space="preserve">
+    <value>状态：Broker、受管任务、日志和已安装应用项均已删除。</value>
+  </data>
+  <data name="BrokerUninstall.FailureElevationCanceled" xml:space="preserve">
+    <value>卸载已取消：未获得管理员批准。</value>
+  </data>
+  <data name="BrokerUninstall.FailureUninstallationFailed" xml:space="preserve">
+    <value>卸载失败、超时，或因任务/路径不安全而拒绝执行；安装目录不会被宽泛删除。</value>
+  </data>
+  <data name="BrokerUninstall.FailureUnexpected" xml:space="preserve">
+    <value>卸载意外失败。请查看本地诊断日志。</value>
   </data>
 
   <!-- ==================== MainPage ==================== -->
@@ -294,7 +432,7 @@
     <value>电池</value>
   </data>
   <data name="Battery.NotDetected" xml:space="preserve">
-    <value># 🔋 电池
+    <value># 电池
 
 未检测到电池（台式机或虚拟机）。</value>
   </data>

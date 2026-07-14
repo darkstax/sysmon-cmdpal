@@ -18,7 +18,7 @@ internal sealed partial class MemoryDockBand : WrappedDockItem
         {
             Title = Loc.Get("Dock.Memory"),
             Subtitle = Loc.Get("Common.Loading"),
-            Icon = new IconInfo(""),
+            Icon = new IconInfo(SysMonIcons.Memory),
         };
         Items = [_memItem];
         DockBandRefreshCoordinator.Subscribe(OnRefresh);

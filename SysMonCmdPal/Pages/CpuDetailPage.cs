@@ -20,7 +20,7 @@ internal sealed partial class CpuDetailPage : RefreshingContentPage
       "body": [
         {
           "type": "TextBlock",
-          "text": "🖥 CPU",
+          "text": "CPU",
           "size": "Large",
           "weight": "Bolder",
           "spacing": "Medium"
@@ -177,7 +177,11 @@ internal sealed partial class CpuDetailPage : RefreshingContentPage
         Icon = new IconInfo(SysMonIcons.Cpu);
         Title = Loc.Get("Cpu.PageTitle");
         Name = "CPU";
-        Commands = [new CommandContextItem(_copyCommand) { Title = Loc.Get("Common.CopyCurrentMetrics") }];
+        Commands =
+        [
+            PageNavigation.BackContextItem(Dispose),
+            new CommandContextItem(_copyCommand) { Title = Loc.Get("Common.CopyCurrentMetrics") },
+        ];
         _form.TemplateJson = Template;
         // Initial placeholder data so FormContent has valid DataJson before first Update
         _form.DataJson = """{"cpuName":"—","cpuUsage":"—","cpuCores":"—","cpuTemp":"—","backend":"—","chartUrl":"","cpuFreq":"—"}""";

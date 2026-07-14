@@ -18,7 +18,7 @@ internal sealed partial class BatteryDockBand : WrappedDockItem
         {
             Title = Loc.Get("Dock.Battery"),
             Subtitle = Loc.Get("Common.Loading"),
-            Icon = new IconInfo(""),
+            Icon = new IconInfo(SysMonIcons.Battery),
         };
         Items = [_batItem];
         DockBandRefreshCoordinator.Subscribe(OnRefresh);

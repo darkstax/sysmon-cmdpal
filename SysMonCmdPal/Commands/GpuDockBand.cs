@@ -19,7 +19,7 @@ internal sealed partial class GpuDockBand : WrappedDockItem
         {
             Title = Loc.Get("Dock.Gpu"),
             Subtitle = Loc.Get("Common.Loading"),
-            Icon = new IconInfo(""),
+            Icon = new IconInfo(SysMonIcons.Gpu),
         };
         Items = [_gpuItem];
         DockBandRefreshCoordinator.Subscribe(OnRefresh);

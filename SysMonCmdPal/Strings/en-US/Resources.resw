@@ -48,6 +48,9 @@
   <data name="Common.CopyCurrentMetrics" xml:space="preserve">
     <value>Copy current metrics</value>
   </data>
+  <data name="Common.Back" xml:space="preserve">
+    <value>Back</value>
+  </data>
   <data name="Common.Yes" xml:space="preserve">
     <value>Yes</value>
   </data>
@@ -124,7 +127,7 @@
     <value>System Monitor</value>
   </data>
   <data name="Provider.Subtitle" xml:space="preserve">
-    <value>CPU · Memory · Disk · Network · Battery · GPU · Sensors · btop4win</value>
+    <value>CPU · Memory · Disk · GPU · Network · Battery · Sensors · btop4win</value>
   </data>
 
   <!-- ==================== Settings ==================== -->
@@ -136,6 +139,141 @@
   </data>
   <data name="Settings.BtopPathPlaceholder" xml:space="preserve">
     <value>C:\tools\btop4win\btop.exe</value>
+  </data>
+  <data name="Settings.PageTitle" xml:space="preserve">
+    <value>System Monitor settings</value>
+  </data>
+  <data name="BrokerInstall.Title" xml:space="preserve">
+    <value>Optional elevated Broker</value>
+  </data>
+  <data name="BrokerInstall.Description" xml:space="preserve">
+    <value>The download starts only after you confirm. SysMonCmdPal validates the matching GitHub Release executable, then performs a protected, recoverable installation with one administrator approval.</value>
+  </data>
+  <data name="BrokerInstall.UnknownArchitecture" xml:space="preserve">
+    <value>unsupported architecture</value>
+  </data>
+  <data name="BrokerInstall.ConfirmTitle" xml:space="preserve">
+    <value>Install SysMonBroker from GitHub?</value>
+  </data>
+  <data name="BrokerInstall.ConfirmDescription" xml:space="preserve">
+    <value>Download the {0} Broker only from this project's GitHub Releases. After verification, Windows will request administrator approval to install under Program Files and register one highest-privilege SYSTEM task triggered at every user sign-in. Continue only if you trust releases from darkstax/sysmon-cmdpal.</value>
+  </data>
+  <data name="BrokerInstall.ConfirmAction" xml:space="preserve">
+    <value>Download and install</value>
+  </data>
+  <data name="BrokerInstall.Started" xml:space="preserve">
+    <value>Broker installation started. Progress is shown in settings.</value>
+  </data>
+  <data name="BrokerInstall.AlreadyRunning" xml:space="preserve">
+    <value>A Broker install or uninstall is already in progress.</value>
+  </data>
+  <data name="BrokerInstall.ButtonInstall" xml:space="preserve">
+    <value>Install Broker from GitHub</value>
+  </data>
+  <data name="BrokerInstall.ButtonUpdate" xml:space="preserve">
+    <value>Update or reinstall Broker</value>
+  </data>
+  <data name="BrokerInstall.ButtonRetry" xml:space="preserve">
+    <value>Retry Broker installation</value>
+  </data>
+  <data name="BrokerInstall.ButtonChecking" xml:space="preserve">
+    <value>Checking GitHub...</value>
+  </data>
+  <data name="BrokerInstall.ButtonDownloading" xml:space="preserve">
+    <value>Downloading Broker...</value>
+  </data>
+  <data name="BrokerInstall.ButtonAwaitingElevation" xml:space="preserve">
+    <value>Waiting for approval...</value>
+  </data>
+  <data name="BrokerInstall.ButtonInstalling" xml:space="preserve">
+    <value>Installing Broker...</value>
+  </data>
+  <data name="BrokerInstall.StatusNotInstalled" xml:space="preserve">
+    <value>Status: Broker is not installed.</value>
+  </data>
+  <data name="BrokerInstall.StatusInstalled" xml:space="preserve">
+    <value>Status: Broker is installed. Use the button to check for the latest release and reinstall it.</value>
+  </data>
+  <data name="BrokerInstall.StatusChecking" xml:space="preserve">
+    <value>Status: Checking the latest GitHub Release for this architecture.</value>
+  </data>
+  <data name="BrokerInstall.StatusDownloading" xml:space="preserve">
+    <value>Status: Downloading and validating the Broker executable.</value>
+  </data>
+  <data name="BrokerInstall.StatusAwaitingElevation" xml:space="preserve">
+    <value>Status: Waiting for the Windows administrator approval prompt.</value>
+  </data>
+  <data name="BrokerInstall.StatusInstalling" xml:space="preserve">
+    <value>Status: Installing into protected directories, registering the SYSTEM task, and checking its process path.</value>
+  </data>
+  <data name="BrokerInstall.StatusSucceeded" xml:space="preserve">
+    <value>Status: Broker was installed, registered for all user sign-ins, and started from the protected path.</value>
+  </data>
+  <data name="BrokerInstall.FailureNetwork" xml:space="preserve">
+    <value>Installation stopped: GitHub could not be reached. Check the network and retry.</value>
+  </data>
+  <data name="BrokerInstall.FailureNoRelease" xml:space="preserve">
+    <value>Installation stopped: this project has no published Broker release yet.</value>
+  </data>
+  <data name="BrokerInstall.FailureNoCompatibleAsset" xml:space="preserve">
+    <value>Installation stopped: the latest release has no Broker executable for this architecture.</value>
+  </data>
+  <data name="BrokerInstall.FailureDownloadInvalid" xml:space="preserve">
+    <value>Installation stopped: the downloaded asset did not pass validation.</value>
+  </data>
+  <data name="BrokerInstall.FailureUnsupportedArchitecture" xml:space="preserve">
+    <value>Installation stopped: Broker installation supports only x64 and ARM64 Windows.</value>
+  </data>
+  <data name="BrokerInstall.FailureElevationCanceled" xml:space="preserve">
+    <value>Installation canceled: administrator approval was not granted.</value>
+  </data>
+  <data name="BrokerInstall.FailureInstallationFailed" xml:space="preserve">
+    <value>Installation failed or timed out during the elevated step. Any previous managed executable and task were restored when possible.</value>
+  </data>
+  <data name="BrokerInstall.FailureUnexpected" xml:space="preserve">
+    <value>Installation failed unexpectedly. Retry or review the local diagnostic log.</value>
+  </data>
+  <data name="BrokerUninstall.ConfirmTitle" xml:space="preserve">
+    <value>Uninstall SysMonBroker?</value>
+  </data>
+  <data name="BrokerUninstall.ConfirmDescription" xml:space="preserve">
+    <value>This removes the managed SYSTEM task, Broker executable, uninstall script, Broker logs, and Windows installed-app entry. If the task action no longer points to the protected Broker path, uninstall stops without deleting it. This action requires administrator approval.</value>
+  </data>
+  <data name="BrokerUninstall.ConfirmAction" xml:space="preserve">
+    <value>Uninstall Broker</value>
+  </data>
+  <data name="BrokerUninstall.Started" xml:space="preserve">
+    <value>Broker uninstall started. Progress is shown in settings.</value>
+  </data>
+  <data name="BrokerUninstall.NotInstalled" xml:space="preserve">
+    <value>Broker is not installed.</value>
+  </data>
+  <data name="BrokerUninstall.ButtonUninstall" xml:space="preserve">
+    <value>Uninstall Broker</value>
+  </data>
+  <data name="BrokerUninstall.ButtonAwaitingElevation" xml:space="preserve">
+    <value>Waiting for uninstall approval...</value>
+  </data>
+  <data name="BrokerUninstall.ButtonUninstalling" xml:space="preserve">
+    <value>Uninstalling Broker...</value>
+  </data>
+  <data name="BrokerUninstall.StatusAwaitingElevation" xml:space="preserve">
+    <value>Status: Waiting for administrator approval to uninstall Broker.</value>
+  </data>
+  <data name="BrokerUninstall.StatusUninstalling" xml:space="preserve">
+    <value>Status: Validating and removing the managed Broker installation.</value>
+  </data>
+  <data name="BrokerUninstall.StatusSucceeded" xml:space="preserve">
+    <value>Status: Broker, its managed task, logs, and installed-app entry were removed.</value>
+  </data>
+  <data name="BrokerUninstall.FailureElevationCanceled" xml:space="preserve">
+    <value>Uninstall canceled: administrator approval was not granted.</value>
+  </data>
+  <data name="BrokerUninstall.FailureUninstallationFailed" xml:space="preserve">
+    <value>Uninstall failed, timed out, or refused an unsafe task or path. The protected installation was not broadly deleted.</value>
+  </data>
+  <data name="BrokerUninstall.FailureUnexpected" xml:space="preserve">
+    <value>Uninstall failed unexpectedly. Review the local diagnostic log.</value>
   </data>
 
   <!-- ==================== MainPage ==================== -->
@@ -294,7 +432,7 @@
     <value>Battery</value>
   </data>
   <data name="Battery.NotDetected" xml:space="preserve">
-    <value># 🔋 Battery
+    <value># Battery
 
 No battery detected (desktop or virtual machine).</value>
   </data>

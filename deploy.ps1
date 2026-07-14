@@ -469,7 +469,7 @@ try {
     Log " 部署完成!"
     Log "========================================"
     Log ""
-    Log "使用: Win+Alt+T 打开 Command Palette, 搜索 'System Monitor'"
+    Log "使用: Win+Q 打开 Command Palette, 搜索 'System Monitor'"
     Log "Broker: $BrokerExe"
     Log "卸载:   .\deploy.ps1 -Action Uninstall"
     Log ""

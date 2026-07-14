@@ -1,5 +1,5 @@
 // Copyright (c) 2026 SysMonCmdPal
-// 主页面 — 系统概览列表（CPU / 内存 / 磁盘 / 网络 / 电池 / GPU）
+// 主页面 — 系统概览列表（CPU / 内存 / 磁盘 / GPU / 网络 / 电池）
 
 using System.Diagnostics;
 using System.Linq;
@@ -13,7 +13,7 @@ namespace SysMonCmdPal;
 /// Command Palette 中打开的主页面。
 /// 以列表形式展示各子系统，选中后进入详情页。
 /// </summary>
-internal sealed partial class SysMonMainPage : ListPage
+internal sealed partial class SysMonMainPage : ListPage, IDisposable
 {
     private readonly SystemInfoService _sysInfo = SystemInfoService.Instance;
 
@@ -42,6 +42,7 @@ internal sealed partial class SysMonMainPage : ListPage
         var info = _sysInfo.Current;
 
         return [
+            PageNavigation.BackListItem(Dispose),
             new ListItem(_cpuPage)
             {
                 Title = Loc.Format("MainPage.CpuTitle", $"{info.CpuUsage:F0}"),
@@ -64,20 +65,6 @@ internal sealed partial class SysMonMainPage : ListPage
                 Subtitle = GetDiskSubtitle(info),
                 Icon = new IconInfo(SysMonIcons.Disk),
             },
-            new ListItem(_netPage)
-            {
-                Title = Loc.Get("MainPage.NetworkTitle"),
-                Subtitle = $"↓ {DockFormat.Speed(info.NetDown)}  ↑ {DockFormat.Speed(info.NetUp)}",
-                Icon = new IconInfo(SysMonIcons.Network),
-            },
-            new ListItem(_batPage)
-            {
-                Title = info.BatteryPercent >= 0
-                    ? Loc.Format("MainPage.BatteryTitle", $"{info.BatteryPercent:F0}", DockFormat.BatteryStatusText(info.BatteryStatus))
-                    : Loc.Get("MainPage.BatteryUnavailable"),
-                Subtitle = Loc.Get("MainPage.BatterySubtitle"),
-                Icon = new IconInfo(SysMonIcons.Battery),
-            },
             new ListItem(_gpuPage)
             {
                 Title = info.Gpus.Length > 0
@@ -92,6 +79,20 @@ internal sealed partial class SysMonMainPage : ListPage
                         ? Loc.Format("MainPage.GpuSubtitleBackend", BackendStatusText(info.Backend))
                         : ""),
                 Icon = new IconInfo(SysMonIcons.Gpu),
+            },
+            new ListItem(_netPage)
+            {
+                Title = Loc.Get("MainPage.NetworkTitle"),
+                Subtitle = $"↓ {DockFormat.Speed(info.NetDown)}  ↑ {DockFormat.Speed(info.NetUp)}",
+                Icon = new IconInfo(SysMonIcons.Network),
+            },
+            new ListItem(_batPage)
+            {
+                Title = info.BatteryPercent >= 0
+                    ? Loc.Format("MainPage.BatteryTitle", $"{info.BatteryPercent:F0}", DockFormat.BatteryStatusText(info.BatteryStatus))
+                    : Loc.Get("MainPage.BatteryUnavailable"),
+                Subtitle = Loc.Get("MainPage.BatterySubtitle"),
+                Icon = new IconInfo(SysMonIcons.Battery),
             },
             new ListItem(_sensorPage)
             {
@@ -194,5 +195,16 @@ internal sealed partial class SysMonMainPage : ListPage
         }
 
         return string.Join(" · ", info.Disks.Select(d => $"{d.Name} {d.UsedPercent:F0}%"));
+    }
+
+    public void Dispose()
+    {
+        _cpuPage.Dispose();
+        _memPage.Dispose();
+        _diskPage.Dispose();
+        _netPage.Dispose();
+        _batPage.Dispose();
+        _gpuPage.Dispose();
+        _sensorPage.Dispose();
     }
 }

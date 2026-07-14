@@ -18,7 +18,7 @@ internal sealed partial class NetworkDownDockBand : WrappedDockItem
         {
             Title = Loc.Get("Dock.Download"),
             Subtitle = Loc.Get("Common.Loading"),
-            Icon = new IconInfo(""),
+            Icon = new IconInfo(SysMonIcons.NetworkDown),
         };
         Items = [_netItem];
         DockBandRefreshCoordinator.Subscribe(OnRefresh);
@@ -44,7 +44,7 @@ internal sealed partial class NetworkUpDockBand : WrappedDockItem
         {
             Title = Loc.Get("Dock.Upload"),
             Subtitle = Loc.Get("Common.Loading"),
-            Icon = new IconInfo(""),
+            Icon = new IconInfo(SysMonIcons.NetworkUp),
         };
         Items = [_netItem];
         DockBandRefreshCoordinator.Subscribe(OnRefresh);

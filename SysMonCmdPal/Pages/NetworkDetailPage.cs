@@ -19,7 +19,7 @@ internal sealed partial class NetworkDetailPage : RefreshingContentPage
       "body": [
         {
           "type": "TextBlock",
-          "text": "🌐 网络",
+          "text": "网络",
           "size": "Large",
           "weight": "Bolder",
           "spacing": "Medium"
@@ -149,7 +149,11 @@ internal sealed partial class NetworkDetailPage : RefreshingContentPage
         Icon = new IconInfo(SysMonIcons.Network);
         Title = Loc.Get("Network.PageTitle");
         Name = Loc.Get("MainPage.NetworkTitle");
-        Commands = [new CommandContextItem(_copyCommand) { Title = Loc.Get("Common.CopyCurrentMetrics") }];
+        Commands =
+        [
+            PageNavigation.BackContextItem(Dispose),
+            new CommandContextItem(_copyCommand) { Title = Loc.Get("Common.CopyCurrentMetrics") },
+        ];
         _form.TemplateJson = Template;
         _form.DataJson = """{"netDown":"—","netUp":"—","ssid":"","downScale":"","upScale":"","downChartUrl":"","upChartUrl":""}""";
     }

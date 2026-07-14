@@ -115,7 +115,7 @@ internal sealed partial class SensorDockCommand : InvokableCommand
             SensorDockCommandMode.AlreadyAdded => Loc.Get("Sensor.DockBandAlreadyAdded"),
             _ => Loc.Get("Sensor.AddDockBand"),
         };
-        Icon = new IconInfo(mode == SensorDockCommandMode.Remove ? "" : "");
+        Icon = new IconInfo(mode == SensorDockCommandMode.Remove ? SysMonIcons.Remove : SysMonIcons.Add);
     }
 
     public override ICommandResult Invoke()

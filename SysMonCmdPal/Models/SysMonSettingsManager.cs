@@ -1,13 +1,16 @@
 // Copyright (c) 2026 SysMonCmdPal
 // CmdPal settings surface backed by the existing settings.json file.
 
-using Microsoft.CommandPalette.Extensions.Toolkit;
 using System.Text.Json.Nodes;
+using Microsoft.CommandPalette.Extensions;
+using Microsoft.CommandPalette.Extensions.Toolkit;
 
 namespace SysMonCmdPal;
 
-internal sealed class SysMonSettingsManager : JsonSettingsManager
+internal sealed partial class SysMonSettingsManager : JsonSettingsManager, ICommandSettings
 {
+    private readonly SysMonSettingsContentPage _settingsPage;
+
     public const string BtopPathKey = "btopPath";
 
     private static readonly HashSet<string> ManagedKeys = new(StringComparer.OrdinalIgnoreCase)
@@ -30,7 +33,11 @@ internal sealed class SysMonSettingsManager : JsonSettingsManager
 
         LoadSettings();
         Settings.SettingsChanged += (_, _) => SaveSettings();
+
+        _settingsPage = new SysMonSettingsContentPage(Settings, new BrokerInstallController());
     }
+
+    public IContentPage SettingsPage => _settingsPage;
 
     public override void SaveSettings()
     {

@@ -18,7 +18,7 @@ internal sealed partial class CpuDockBand : WrappedDockItem
         {
             Title = Loc.Get("Dock.Cpu"),
             Subtitle = Loc.Get("Common.Loading"),
-            Icon = new IconInfo(""),
+            Icon = new IconInfo(SysMonIcons.Cpu),
         };
         Items = [_cpuItem];
         DockBandRefreshCoordinator.Subscribe(OnRefresh);

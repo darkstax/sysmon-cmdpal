@@ -13,10 +13,14 @@ internal sealed partial class BrokerDiagnosticsPage : ContentPage
 
     public BrokerDiagnosticsPage()
     {
-        Icon = new IconInfo("");
+        Icon = new IconInfo(SysMonIcons.Diagnostics);
         Title = Loc.Get("BrokerDiagnostics.PageTitle");
         Name = "BrokerDiagnostics";
-        Commands = [new CommandContextItem(_copyCommand) { Title = Loc.Get("BrokerDiagnostics.CopyDiagnostics") }];
+        Commands =
+        [
+            PageNavigation.BackContextItem(),
+            new CommandContextItem(_copyCommand) { Title = Loc.Get("BrokerDiagnostics.CopyDiagnostics") },
+        ];
     }
 
     public override IContent[] GetContent()

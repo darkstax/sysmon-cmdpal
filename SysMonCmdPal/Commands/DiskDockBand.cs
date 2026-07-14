@@ -19,7 +19,7 @@ internal sealed partial class DiskDockBand : WrappedDockItem
         {
             Title = Loc.Get("Dock.Disk"),
             Subtitle = Loc.Get("Common.Loading"),
-            Icon = new IconInfo(""),
+            Icon = new IconInfo(SysMonIcons.Disk),
         };
         Items = [_diskItem];
         DockBandRefreshCoordinator.Subscribe(OnRefresh);
@@ -46,19 +46,27 @@ internal sealed partial class DiskDockBand : WrappedDockItem
         _diskItem.Subtitle = FormatDiskSubtitle(info);
     }
 
-    private static string FormatDiskSubtitle(SystemSnapshot info)
+    internal static string FormatDiskSubtitle(SystemSnapshot info)
     {
         if (info.PhysicalDisks is { Length: > 0 })
         {
-            return string.Join("  ", info.PhysicalDisks.Select(d =>
-            {
-                string protocol = string.IsNullOrWhiteSpace(d.InterfaceType) ? "—" : d.InterfaceType;
-                var partitions = d.Partitions ?? [];
-                long partTotal = partitions.Sum(p => p.TotalBytes);
-                long partUsed = partitions.Sum(p => p.TotalBytes - p.FreeBytes);
-                double usedPct = partTotal > 0 ? partUsed * 100.0 / partTotal : 0;
-                return $"{protocol} {usedPct:F0}%";
-            }));
+            string[] physicalSummaries = info.PhysicalDisks
+                .Select(d => d.Partitions ?? [])
+                .Where(partitions => partitions.Any(p => !string.IsNullOrWhiteSpace(p.Name)))
+                .Select(partitions =>
+                {
+                    string partitionLabel = string.Join(" + ", partitions
+                        .Select(p => p.Name)
+                        .Where(name => !string.IsNullOrWhiteSpace(name)));
+                    long partTotal = partitions.Sum(p => p.TotalBytes);
+                    long partUsed = partitions.Sum(p => p.TotalBytes - p.FreeBytes);
+                    double usedPct = partTotal > 0 ? partUsed * 100.0 / partTotal : 0;
+                    return $"{partitionLabel} {usedPct:F0}%";
+                })
+                .ToArray();
+
+            if (physicalSummaries.Length > 0)
+                return string.Join("  ", physicalSummaries);
         }
 
         return string.Join("  ", info.Disks.Select(d => $"{d.Name} {d.UsedPercent:F0}%"));

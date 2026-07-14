@@ -14,38 +14,80 @@ namespace SysMonCmdPal;
 /// 显示来自 Broker 的全量 LHM 传感器数据，按类别分组。
 /// 仅在 Broker 可用时显示有效数据。
 /// </summary>
-internal sealed partial class SensorListPage : ListPage
+internal sealed partial class SensorListPage : ListPage, IDisposable
 {
+    private readonly Dictionary<int, SensorCategoryPage> _categoryPages = [];
+    private readonly object _categoryPagesLock = new();
+    private bool _subscribed;
+
     public SensorListPage()
     {
-        Icon = new IconInfo("");
+        Icon = new IconInfo(SysMonIcons.Sensors);
         Title = Loc.Get("Sensor.PageTitle");
         Name = "Sensors";
     }
 
     public override IListItem[] GetItems()
     {
+        EnsureSubscribed();
         var snap = BrokerPushReceiver.Instance.Snapshot;
         if (!(snap.IsAlive && snap.IsFresh) || snap.AllSensors.Count == 0)
         {
-            return CreateNoDataItems(snap);
+            return [PageNavigation.BackListItem(Dispose), .. CreateNoDataItems(snap)];
         }
 
         var items = new List<IListItem>(ShmLayout.BrowseCategories.Count + snap.AllSensors.Count);
         items.AddRange(CreateCategoryItems(snap));
         items.AddRange(CreateSensorItems(snap.AllSensors));
 
-        return items.Count == 0 ? CreateEmptyItems() : items.ToArray();
+        IListItem[] content = items.Count == 0 ? CreateEmptyItems() : items.ToArray();
+        return [PageNavigation.BackListItem(Dispose), .. content];
     }
 
-    private static IEnumerable<IListItem> CreateCategoryItems(BrokerSensorSnapshot snap)
+    private void EnsureSubscribed()
+    {
+        if (_subscribed)
+            return;
+
+        _subscribed = true;
+        DockBandRefreshCoordinator.Subscribe(OnRefresh);
+        SensorDockSettings.Changed += OnSensorDockSettingsChanged;
+    }
+
+    private void OnRefresh()
+    {
+        RaiseItemsChanged();
+        SensorCategoryPage[] pages;
+        lock (_categoryPagesLock)
+            pages = _categoryPages.Values.ToArray();
+
+        foreach (var page in pages)
+            page.RequestRefresh();
+    }
+
+    private void OnSensorDockSettingsChanged(object? sender, EventArgs e) => OnRefresh();
+
+    public void Dispose()
+    {
+        if (_subscribed)
+        {
+            DockBandRefreshCoordinator.Unsubscribe(OnRefresh);
+            SensorDockSettings.Changed -= OnSensorDockSettingsChanged;
+            _subscribed = false;
+        }
+
+        lock (_categoryPagesLock)
+            _categoryPages.Clear();
+    }
+
+    private IEnumerable<IListItem> CreateCategoryItems(BrokerSensorSnapshot snap)
     {
         return ShmLayout.BrowseCategories.Select(category =>
         {
             int count = snap.AllSensors.Count(sensor => ShmLayout.BrowseCategoryMatchesTag(category, sensor.Tag));
             int representativeTag = ShmLayout.BrowseCategoryRepresentativeTag(category);
 
-            return (IListItem)new ListItem(new SensorCategoryPage(category))
+            return (IListItem)new ListItem(GetOrCreateCategoryPage(category))
             {
                 Title = ShmLayout.BrowseCategoryName(category),
                 Subtitle = Loc.Format("Sensor.BrowseCount", count),
@@ -54,15 +96,28 @@ internal sealed partial class SensorListPage : ListPage
         });
     }
 
+    private SensorCategoryPage GetOrCreateCategoryPage(int category)
+    {
+        lock (_categoryPagesLock)
+        {
+            if (_categoryPages.TryGetValue(category, out var page))
+                return page;
+
+            page = new SensorCategoryPage(category);
+            _categoryPages[category] = page;
+            return page;
+        }
+    }
+
     internal static IListItem[] CreateNoDataItems(BrokerSensorSnapshot snap)
     {
         return
         [
-            new ListItem(NoOpPage.Instance)
+            new ListItem(new NoOpCommand())
             {
                 Title = Loc.Get("Sensor.NoData"),
                 Subtitle = GetNoDataSubtitle(snap),
-                Icon = new IconInfo(""),
+                Icon = new IconInfo(SysMonIcons.SensorUnavailable),
             }
         ];
     }
@@ -90,11 +145,11 @@ internal sealed partial class SensorListPage : ListPage
     {
         return
         [
-            new ListItem(NoOpPage.Instance)
+            new ListItem(new NoOpCommand())
             {
                 Title = Loc.Get("Sensor.EmptyList"),
                 Subtitle = Loc.Get("Sensor.EmptyListDetail"),
-                Icon = new IconInfo(""),
+                Icon = new IconInfo(SysMonIcons.SensorUnavailable),
             }
         ];
     }
@@ -124,7 +179,7 @@ internal sealed partial class SensorListPage : ListPage
 
         var item = new ListItem(dockKey.IsValid
             ? new SensorDockCommand(dockKey, isDocked ? SensorDockCommandMode.AlreadyAdded : SensorDockCommandMode.Add)
-            : NoOpPage.Instance)
+            : new NoOpCommand())
         {
             Title = Loc.Format("Sensor.ItemTitle", categoryName, sensor.Name),
             Subtitle = valueStr,
@@ -165,11 +220,11 @@ internal sealed partial class SensorListPage : ListPage
 
     internal static string GetCategoryIcon(int tag) => tag switch
     {
-        0 or 1 or 2 or 3 or 4 => "",    // CPU
-        5 or 6 or 7 or 8 or 9 or 10 or 11 => "",  // GPU
-        12 or 13 or 14 => "",             // Motherboard
-        15 or 16 => "",                    // Storage
-        _ => "",
+        0 or 1 or 2 or 3 or 4 => SysMonIcons.Cpu,
+        5 or 6 or 7 or 8 or 9 or 10 or 11 => SysMonIcons.Gpu,
+        12 or 13 or 14 => SysMonIcons.Sensors,
+        15 or 16 => SysMonIcons.Disk,
+        _ => SysMonIcons.Sensors,
     };
 }
 
@@ -192,7 +247,7 @@ internal sealed partial class SensorCategoryPage : ListPage
         var snap = BrokerPushReceiver.Instance.Snapshot;
         if (!(snap.IsAlive && snap.IsFresh) || snap.AllSensors.Count == 0)
         {
-            return SensorListPage.CreateNoDataItems(snap);
+            return [PageNavigation.BackListItem(), .. SensorListPage.CreateNoDataItems(snap)];
         }
 
         var sensors = snap.AllSensors
@@ -203,7 +258,8 @@ internal sealed partial class SensorCategoryPage : ListPage
         {
             return
             [
-                new ListItem(NoOpPage.Instance)
+                PageNavigation.BackListItem(),
+                new ListItem(new NoOpCommand())
                 {
                     Title = Loc.Get("Sensor.EmptyList"),
                     Subtitle = Loc.Format("Sensor.CategoryEmptyDetail", ShmLayout.BrowseCategoryName(_category)),
@@ -213,23 +269,8 @@ internal sealed partial class SensorCategoryPage : ListPage
             ];
         }
 
-        return SensorListPage.CreateSensorItems(sensors);
-    }
-}
-
-/// <summary>空页面 — 传感器条目不需要跳转</summary>
-internal sealed partial class NoOpPage : ContentPage
-{
-    public static NoOpPage Instance { get; } = new();
-
-    public NoOpPage()
-    {
-        Title = Loc.Get("Sensor.NoOpTitle");
-        Name = "Sensor";
+        return [PageNavigation.BackListItem(), .. SensorListPage.CreateSensorItems(sensors)];
     }
 
-    public override IContent[] GetContent()
-    {
-        return [new MarkdownContent(Loc.Get("Sensor.NoOpContent"))];
-    }
+    internal void RequestRefresh() => RaiseItemsChanged();
 }

@@ -19,7 +19,7 @@ internal sealed partial class MemoryDetailPage : RefreshingContentPage
       "body": [
         {
           "type": "TextBlock",
-          "text": "🧠 内存",
+          "text": "内存",
           "size": "Large",
           "weight": "Bolder",
           "spacing": "Medium"
@@ -143,7 +143,11 @@ internal sealed partial class MemoryDetailPage : RefreshingContentPage
         Icon = new IconInfo(SysMonIcons.Memory);
         Title = Loc.Get("Memory.PageTitle");
         Name = Loc.Get("Dock.Memory");
-        Commands = [new CommandContextItem(_copyCommand) { Title = Loc.Get("Common.CopyCurrentMetrics") }];
+        Commands =
+        [
+            PageNavigation.BackContextItem(Dispose),
+            new CommandContextItem(_copyCommand) { Title = Loc.Get("Common.CopyCurrentMetrics") },
+        ];
         _form.TemplateJson = Template;
         _form.DataJson = """{"memUsagePct":"—","memUsedGB":"—","memFreeGB":"—","memTotalGB":"—","chartUrl":""}""";
     }
