@@ -1,15 +1,14 @@
-// SysMonBroker — LHM thin-shell + Shared Memory IPC (v2.3)
+// SysMonBroker — LHM thin-shell + Shared Memory IPC (v2.4)
 // Runs as admin. Provides sensor data via SharedMemory v2 to SysMonCmdPal plugin.
 //
 // Usage:
 //   SysMonBroker.exe   — normal mode (LHM + SHM)
 //
+// v2.4: Adds atomic SMX1 commits, instance identity, and a writer lease.
 // v2.3: Removed COM Local Server (btop4win no longer reads it).
 //       Removed JSON snapshot (only btop4win consumed it).
 //       Removed DevMode verifier + hash registration.
 
-using System.IO.MemoryMappedFiles;
-using System.Text;
 using System.Threading;
 using SysMonBroker.IPC;
 using SysMonBroker.Logging;
@@ -19,6 +18,8 @@ namespace SysMonBroker;
 
 internal static class Program
 {
+    private const int WriterConflictExitCode = 2;
+
     static int Main(string[] args)
     {
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
@@ -28,7 +29,7 @@ internal static class Program
             Thread.Sleep(500);
         };
 
-        Log($"=== SysMonBroker v2.3 starting (standalone SHM mode) ===");
+        Log($"=== SysMonBroker v2.4 starting (standalone SHM mode) ===");
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
@@ -38,13 +39,14 @@ internal static class Program
 
         try
         {
+            Log("Creating SharedMemory v2 + SMX1...");
+            shm = new BrokerSharedMemory();
+            Log($"SharedMemory: {BrokerSharedMemory.MapName} (size={BrokerSharedMemory.MapSize}, " +
+                $"instance={shm.InstanceId:X16}, writerLease={BrokerSharedMemory.WriterMutexName})");
+
             Log("Creating SensorCollector (LHM Computer.Open)...");
             collector = new SensorCollector();
             Log($"SensorCollector ready. PawnIO: {(collector.PawnIoInstalled ? "installed" : "not installed — user-mode sensors only")}");
-
-            Log("Creating SharedMemory v2...");
-            shm = new BrokerSharedMemory();
-            Log($"SharedMemory: {BrokerSharedMemory.MapName} (size={BrokerSharedMemory.MapSize})");
 
             int cycle = 0;
 
@@ -72,6 +74,11 @@ internal static class Program
                         }
                     }
                 }
+                catch (BrokerWriterConflictException ex)
+                {
+                    Log($"FATAL: {ex.Message} Stopping to avoid multiple shared-memory writers.");
+                    return WriterConflictExitCode;
+                }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     Log($"Cycle error: {ex.Message}");
@@ -79,6 +86,16 @@ internal static class Program
 
                 Thread.Sleep(2000);
             }
+        }
+        catch (BrokerAlreadyRunningException ex)
+        {
+            Log($"FATAL: {ex.Message}");
+            return WriterConflictExitCode;
+        }
+        catch (BrokerWriterConflictException ex)
+        {
+            Log($"FATAL: {ex.Message}");
+            return WriterConflictExitCode;
         }
         catch (Exception ex)
         {

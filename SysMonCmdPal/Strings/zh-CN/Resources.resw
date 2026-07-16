@@ -550,11 +550,32 @@
   <data name="BrokerDiagnostics.DataFresh" xml:space="preserve">
     <value>数据新鲜</value>
   </data>
+  <data name="BrokerDiagnostics.BrokerUsable" xml:space="preserve">
+    <value>Broker 可用</value>
+  </data>
+  <data name="BrokerDiagnostics.ProtocolValid" xml:space="preserve">
+    <value>协议有效</value>
+  </data>
+  <data name="BrokerDiagnostics.Stalled" xml:space="preserve">
+    <value>提交已停滞</value>
+  </data>
+  <data name="BrokerDiagnostics.MapName" xml:space="preserve">
+    <value>共享内存映射</value>
+  </data>
   <data name="BrokerDiagnostics.Version" xml:space="preserve">
     <value>SHM 版本</value>
   </data>
   <data name="BrokerDiagnostics.Counter" xml:space="preserve">
     <value>计数器</value>
+  </data>
+  <data name="BrokerDiagnostics.CommitSequence" xml:space="preserve">
+    <value>提交序列</value>
+  </data>
+  <data name="BrokerDiagnostics.InstanceId" xml:space="preserve">
+    <value>Broker 实例</value>
+  </data>
+  <data name="BrokerDiagnostics.RestartCount" xml:space="preserve">
+    <value>检测到的重启次数</value>
   </data>
   <data name="BrokerDiagnostics.SensorCount" xml:space="preserve">
     <value>传感器数量</value>
@@ -564,6 +585,9 @@
   </data>
   <data name="BrokerDiagnostics.LastRead" xml:space="preserve">
     <value>最近 SHM 读取</value>
+  </data>
+  <data name="BrokerDiagnostics.LastCommit" xml:space="preserve">
+    <value>最近有效提交</value>
   </data>
   <data name="BrokerDiagnostics.LastPush" xml:space="preserve">
     <value>最近快照推送</value>

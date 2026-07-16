@@ -4,11 +4,15 @@
 # 用法:
 #   .\dev-deploy.ps1              # 构建 + 松散注册
 #   .\dev-deploy.ps1 -SkipBuild   # 跳过构建，直接注册已有产物
+#   .\dev-deploy.ps1 -DeployBroker # 同时更新 SYSTEM Broker
+#   .\dev-deploy.ps1 -BrokerOnly   # 只发布和更新 SYSTEM Broker
 #   .\dev-deploy.ps1 -Uninstall   # 卸载
 
 param(
     [switch]$SkipBuild,
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [switch]$DeployBroker,
+    [switch]$BrokerOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,6 +24,13 @@ $BuildOutputDir = Join-Path $ProjectRoot "SysMonCmdPal\bin\x64\Debug\net10.0-win
 $LooseRoot = Join-Path $env:LOCALAPPDATA "SysMonCmdPal\Loose"
 $BinDir = Join-Path $LooseRoot "win-x64"
 $ManifestPath = Join-Path $BinDir "AppxManifest.xml"
+$BrokerProject = Join-Path $ProjectRoot "SysMonBroker\SysMonBroker.csproj"
+$BrokerPublishDir = Join-Path $ProjectRoot "SysMonBroker\bin\x64\Debug\net10.0-windows10.0.26100.0\win-x64\publish"
+$BrokerPublishExe = Join-Path $BrokerPublishDir "SysMonBroker.exe"
+
+if ($BrokerOnly) {
+    $DeployBroker = $true
+}
 
 function Log($msg) {
     Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $msg" -ForegroundColor Cyan
@@ -47,6 +58,51 @@ function Get-AppxMSBuildToolsPath {
         if (Test-Path $p) { return $p }
     }
     return $null
+}
+
+function Test-IsAdministrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Invoke-DevelopmentBrokerDeploy {
+    if (-not (Test-Path -LiteralPath $BrokerPublishExe -PathType Leaf)) {
+        throw "找不到 Broker 发布产物: $BrokerPublishExe"
+    }
+
+    $stageDirectory = Join-Path $env:TEMP "SysMonCmdPal\BrokerDevDeploy"
+    $stageExe = Join-Path $stageDirectory "SysMonBroker.exe"
+    New-Item -ItemType Directory -Path $stageDirectory -Force | Out-Null
+    Copy-Item -LiteralPath $BrokerPublishExe -Destination $stageExe -Force
+    Unblock-File -LiteralPath $stageExe -ErrorAction SilentlyContinue
+
+    $helper = Join-Path $ProjectRoot "dev-deploy-broker.ps1"
+    try {
+        if (Test-IsAdministrator) {
+            & $helper -Source $stageExe
+            return
+        }
+
+        $gsudo = Get-Command gsudo.exe -ErrorAction SilentlyContinue
+        if ($gsudo) {
+            & $gsudo.Source pwsh.exe -NoProfile -ExecutionPolicy Bypass -File $helper -Source $stageExe
+            if ($LASTEXITCODE -ne 0) { throw "Broker 开发部署失败" }
+            return
+        }
+
+        $escapedHelper = $helper.Replace("'", "''")
+        $escapedSource = $stageExe.Replace("'", "''")
+        $command = "& '$escapedHelper' -Source '$escapedSource'"
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+        $process = Start-Process pwsh.exe -Verb RunAs -Wait -PassThru -ArgumentList @(
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-EncodedCommand", $encoded)
+        if ($process.ExitCode -ne 0) { throw "Broker 开发部署失败" }
+    } finally {
+        Remove-Item -LiteralPath $stageDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # ── Uninstall ─────────────────────────────────────────────────
@@ -101,6 +157,28 @@ if (-not $SkipBuild) {
         exit 1
     }
     Log "构建完成"
+
+    if ($DeployBroker) {
+        Log "=== 发布 Broker (Debug/x64) ==="
+        & dotnet publish $BrokerProject `
+            -c Debug `
+            -r win-x64 `
+            --self-contained true `
+            -p:Platform=x64 `
+            --nologo
+        if ($LASTEXITCODE -ne 0) {
+            Log "FATAL: Broker 发布失败 (exit $LASTEXITCODE)"
+            exit 1
+        }
+        Log "Broker 发布完成"
+    }
+}
+
+if ($BrokerOnly) {
+    Log "=== 仅开发 Broker 部署 ==="
+    Invoke-DevelopmentBrokerDeploy
+    Log "Broker-only 开发部署完成"
+    exit 0
 }
 
 # ── Loose Register ────────────────────────────────────────────
@@ -166,6 +244,11 @@ Log "注册: $ManifestPath"
 Add-AppxPackage -Register $ManifestPath -ErrorAction Stop
 Log "松散源注册成功"
 
+if ($DeployBroker) {
+    Log "=== 开发 Broker 部署 ==="
+    Invoke-DevelopmentBrokerDeploy
+}
+
 # 验证
 $pkg = Get-AppxPackage -Name $PackageName -ErrorAction SilentlyContinue
 if ($pkg) {
@@ -180,5 +263,7 @@ Log "========================================"
 Log ""
 Log "Win+Q 打开 Command Palette, 搜索 'System Monitor'"
 Log "重新部署: .\dev-deploy.ps1"
+Log "含 Broker: .\dev-deploy.ps1 -DeployBroker"
+Log "仅 Broker: .\dev-deploy.ps1 -BrokerOnly"
 Log "卸载:     .\dev-deploy.ps1 -Uninstall"
 Log ""

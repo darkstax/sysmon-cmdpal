@@ -7,14 +7,22 @@
 // plugin reader with "file in use" errors. Native API gives full control.
 //
 // Memory ordering contract:
-//   Writer: writes all data fields, then MemoryBarrier, then writes counter.
-//   Reader: reads counter first to detect changes, then reads data fields.
+//   Legacy reader: counter is still written after every data field.
+//   Extended reader: reads the commit sequence before/after copying; odd or
+//   changed values mean the snapshot was in flight and must be retried.
 //
 // ACL: D:P(A;;GR;;;BU)(A;;GA;;;BA)(A;;GA;;;SY) — Users read, Admins/System full control
 // SensorEntry.HardwareTag packs hardware type in the low byte and same-type
 // instance index in the upper bits, so multiple GPUs of the same vendor stay distinct.
+//
+// Compatible v2 extension (the legacy layout and map size stay unchanged):
+//   12..15     int32 commit sequence (odd = writing, even = committed)
+//   16364..67  int32 extension magic/version
+//   16368..75  uint64 Broker instance ID
+//   16376..83  int64 monotonic publish time (Environment.TickCount64 milliseconds)
 
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 
@@ -23,10 +31,27 @@ namespace SysMonBroker.IPC;
 /// <summary>Generic sensor entry for shared memory. HardwareTag = type | (instance << 8).</summary>
 public sealed record SensorEntry(int Tag, string Name, double Value, string Unit, int HardwareTag);
 
+public sealed class BrokerAlreadyRunningException : InvalidOperationException
+{
+    public BrokerAlreadyRunningException()
+        : base("Another SysMonBroker already owns the shared-memory writer lease.")
+    {
+    }
+}
+
+public sealed class BrokerWriterConflictException : InvalidOperationException
+{
+    public BrokerWriterConflictException()
+        : base("Shared memory was modified by another Broker writer.")
+    {
+    }
+}
+
 public sealed class BrokerSharedMemory : IDisposable
 {
     public const string MapName = @"Global\SysMonBrokerShm";
     public const string EventName = @"Global\SysMonBrokerEvent";
+    public const string WriterMutexName = @"Global\SysMonBrokerWriter";
     public const int MagicValue = 0x5342524B;
     public const int MapVersion = 2;
     public const int MapSize = 16384;
@@ -37,6 +62,7 @@ public sealed class BrokerSharedMemory : IDisposable
     private const int OffMagic = 0;
     private const int OffVersion = 4;
     private const int OffCounter = 8;
+    private const int OffCommitSequence = 12;
     private const int OffCpuTemp = 16;
     private const int OffSource = 24;
     private const int OffGpuCount = 56;
@@ -44,6 +70,12 @@ public sealed class BrokerSharedMemory : IDisposable
     private const int OffTimestamp = 348;
     private const int OffSensorCount = 360;
     private const int OffSensorBase = 364;
+
+    // v2 compatible extension in the 20-byte tail after SensorEntry[250].
+    private const int OffExtensionMagic = 16364;
+    private const int OffInstanceId = 16368;
+    private const int OffMonotonicPublishMs = 16376;
+    private const int ExtensionMagicValue = 0x31584D53; // "SMX1"
 
     // GPU entry (72 bytes)
     private const int GpuNameLen = 32;
@@ -64,11 +96,18 @@ public sealed class BrokerSharedMemory : IDisposable
     private const string Sddl = "D:P(A;;GR;;;BU)(A;;GA;;;BA)(A;;GA;;;SY)";
     private const int ERROR_ALREADY_EXISTS = 183;
 
+    private IntPtr _hWriterMutex = IntPtr.Zero;
+    private bool _ownsWriterMutex;
     private IntPtr _hMap = IntPtr.Zero;
     private IntPtr _pView = IntPtr.Zero;
-    private readonly EventWaitHandle _event;
+    private EventWaitHandle? _event;
     private int _counter;
+    private int _commitSequence;
+    private long _lastUtcTimestamp;
+    private long _lastMonotonicPublishMs;
     private bool _disposed;
+
+    public ulong InstanceId { get; } = CreateInstanceId();
 
     // ---- P/Invoke ----
 
@@ -99,6 +138,17 @@ public sealed class BrokerSharedMemory : IDisposable
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr hObject);
 
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateMutex(ref SECURITY_ATTRIBUTES lpMutexAttributes,
+        [MarshalAs(UnmanagedType.Bool)] bool bInitialOwner, string lpName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ReleaseMutex(IntPtr hMutex);
+
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(
         string stringSecurityDescriptor, uint stringSDRevision,
@@ -119,6 +169,10 @@ public sealed class BrokerSharedMemory : IDisposable
 
     private const uint PAGE_READWRITE = 0x04;
     private const uint FILE_MAP_WRITE = 0x0002;
+    private const uint WAIT_OBJECT_0 = 0x00000000;
+    private const uint WAIT_ABANDONED = 0x00000080;
+    private const uint WAIT_TIMEOUT = 0x00000102;
+    private const uint WAIT_FAILED = 0xFFFFFFFF;
 
     private const uint SE_KERNEL_OBJECT = 6;
     private const uint DACL_SECURITY_INFORMATION = 4;
@@ -127,26 +181,27 @@ public sealed class BrokerSharedMemory : IDisposable
 
     public BrokerSharedMemory()
     {
-        IntPtr sd = IntPtr.Zero;
-        bool alreadyExists;
-
         try
         {
-            var sa = CreateSecurityAttributes(out sd);
-            _hMap = CreateFileMapping(InvalidHandleValue, ref sa, PAGE_READWRITE,
-                0, MapSize, MapName);
-            int lastError = Marshal.GetLastWin32Error();
-            if (_hMap == IntPtr.Zero)
-                throw new System.ComponentModel.Win32Exception(lastError);
-            alreadyExists = lastError == ERROR_ALREADY_EXISTS;
-        }
-        finally
-        {
-            if (sd != IntPtr.Zero) LocalFree(sd);
-        }
+            AcquireWriterMutex();
 
-        try
-        {
+            bool alreadyExists;
+            IntPtr sd = IntPtr.Zero;
+            try
+            {
+                var sa = CreateSecurityAttributes(out sd);
+                _hMap = CreateFileMapping(InvalidHandleValue, ref sa, PAGE_READWRITE,
+                    0, MapSize, MapName);
+                int lastError = Marshal.GetLastWin32Error();
+                if (_hMap == IntPtr.Zero)
+                    throw new System.ComponentModel.Win32Exception(lastError);
+                alreadyExists = lastError == ERROR_ALREADY_EXISTS;
+            }
+            finally
+            {
+                if (sd != IntPtr.Zero) LocalFree(sd);
+            }
+
             if (alreadyExists)
                 ApplySecurityDescriptor(throwOnFailure: true);
 
@@ -161,11 +216,48 @@ public sealed class BrokerSharedMemory : IDisposable
         }
         catch
         {
-            // M7: 构造函数异常时释放已创建的资源
-            if (_pView != IntPtr.Zero) { UnmapViewOfFile(_pView); _pView = IntPtr.Zero; }
-            if (_hMap != IntPtr.Zero) { CloseHandle(_hMap); _hMap = IntPtr.Zero; }
+            InvalidateExtension();
             _event?.Dispose();
+            _event = null;
+            ReleaseNativeResources();
             throw;
+        }
+    }
+
+    private void AcquireWriterMutex()
+    {
+        IntPtr sd = IntPtr.Zero;
+        try
+        {
+            var sa = CreateSecurityAttributes(out sd);
+            _hWriterMutex = CreateMutex(ref sa, bInitialOwner: true, WriterMutexName);
+            int lastError = Marshal.GetLastWin32Error();
+            if (_hWriterMutex == IntPtr.Zero)
+                throw new System.ComponentModel.Win32Exception(lastError);
+
+            if (lastError != ERROR_ALREADY_EXISTS)
+            {
+                _ownsWriterMutex = true;
+                return;
+            }
+
+            uint waitResult = WaitForSingleObject(_hWriterMutex, 0);
+            if (waitResult is WAIT_OBJECT_0 or WAIT_ABANDONED)
+            {
+                _ownsWriterMutex = true;
+                return;
+            }
+
+            if (waitResult == WAIT_TIMEOUT)
+                throw new BrokerAlreadyRunningException();
+            if (waitResult == WAIT_FAILED)
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+
+            throw new InvalidOperationException($"Unexpected writer mutex wait result: 0x{waitResult:X8}");
+        }
+        finally
+        {
+            if (sd != IntPtr.Zero) LocalFree(sd);
         }
     }
 
@@ -186,16 +278,35 @@ public sealed class BrokerSharedMemory : IDisposable
     private unsafe void InitializeHeader()
     {
         byte* p = (byte*)_pView;
-        _counter = 0;
+
+        bool validLegacyHeader = *(int*)(p + OffMagic) == MagicValue &&
+            *(int*)(p + OffVersion) >= 1;
+        int previousCounter = validLegacyHeader ? *(int*)(p + OffCounter) : 0;
+        long previousUtcTimestamp = validLegacyHeader ? *(long*)(p + OffTimestamp) : 0;
+
+        bool validExtension = *(int*)(p + OffExtensionMagic) == ExtensionMagicValue;
+        _commitSequence = validExtension
+            ? Volatile.Read(ref *(int*)(p + OffCommitSequence)) & ~1
+            : 0;
+        // Initializing a new Broker instance is not a sensor-data commit. Keep
+        // the legacy counter unchanged so older readers wait for the first
+        // real Write() instead of publishing the empty initialization payload.
+        _counter = previousCounter;
+        _lastUtcTimestamp = NextUtcTimestamp(previousUtcTimestamp);
+        _lastMonotonicPublishMs = NextMonotonicPublishMs(0);
+
+        BeginCommit(p);
         *(int*)(p + OffMagic) = MagicValue;
         *(int*)(p + OffVersion) = MapVersion;
         *(double*)(p + OffCpuTemp) = -1;
         WriteString(p + OffSource, "None", 32);
         *(int*)(p + OffGpuCount) = 0;
-        *(long*)(p + OffTimestamp) = DateTime.UtcNow.Ticks;
+        *(long*)(p + OffTimestamp) = _lastUtcTimestamp;
         *(int*)(p + OffSensorCount) = 0;
-        Thread.MemoryBarrier();
-        *(int*)(p + OffCounter) = _counter;
+        WriteExtension(p);
+        CompleteCommit(p);
+
+        _event?.Set();
     }
 
     private void ApplySecurityDescriptor(bool throwOnFailure)
@@ -235,7 +346,13 @@ public sealed class BrokerSharedMemory : IDisposable
 
         byte* p = (byte*)_pView;
 
-        _counter++;
+        EnsureWriterOwnership(p);
+        BeginCommit(p);
+
+        _counter = NextCounter(_counter);
+        _lastUtcTimestamp = NextUtcTimestamp(_lastUtcTimestamp);
+        _lastMonotonicPublishMs = NextMonotonicPublishMs(_lastMonotonicPublishMs);
+
         *(int*)(p + OffMagic) = MagicValue;
         *(int*)(p + OffVersion) = MapVersion;
 
@@ -254,7 +371,7 @@ public sealed class BrokerSharedMemory : IDisposable
             *(double*)(gpuPtr + GpuMemTotalOff) = gpus[i].MemTotalMB;
         }
 
-        *(long*)(p + OffTimestamp) = DateTime.UtcNow.Ticks;
+        *(long*)(p + OffTimestamp) = _lastUtcTimestamp;
 
         int sensorCount = Math.Min(sensors.Count, MaxSensors);
         *(int*)(p + OffSensorCount) = sensorCount;
@@ -269,10 +386,80 @@ public sealed class BrokerSharedMemory : IDisposable
             *(int*)(sPtr + SensorHwOff) = s.HardwareTag;
         }
 
-        Thread.MemoryBarrier();
-        *(int*)(p + OffCounter) = _counter;
+        WriteExtension(p);
+        CompleteCommit(p);
 
-        _event.Set();
+        _event?.Set();
+    }
+
+    private unsafe void EnsureWriterOwnership(byte* p)
+    {
+        int commitSequence = Volatile.Read(ref *(int*)(p + OffCommitSequence));
+        Thread.MemoryBarrier();
+
+        bool ownsSnapshot = commitSequence == _commitSequence &&
+            *(int*)(p + OffExtensionMagic) == ExtensionMagicValue &&
+            *(ulong*)(p + OffInstanceId) == InstanceId &&
+            *(long*)(p + OffMonotonicPublishMs) == _lastMonotonicPublishMs &&
+            *(int*)(p + OffCounter) == _counter &&
+            *(long*)(p + OffTimestamp) == _lastUtcTimestamp;
+
+        Thread.MemoryBarrier();
+        if (!ownsSnapshot || Volatile.Read(ref *(int*)(p + OffCommitSequence)) != commitSequence)
+            throw new BrokerWriterConflictException();
+    }
+
+    private unsafe void BeginCommit(byte* p)
+    {
+        int nextOdd = unchecked((_commitSequence & ~1) + 1);
+        _commitSequence = nextOdd;
+        Volatile.Write(ref *(int*)(p + OffCommitSequence), nextOdd);
+        Thread.MemoryBarrier();
+    }
+
+    private unsafe void WriteExtension(byte* p)
+    {
+        *(int*)(p + OffExtensionMagic) = ExtensionMagicValue;
+        *(ulong*)(p + OffInstanceId) = InstanceId;
+        *(long*)(p + OffMonotonicPublishMs) = _lastMonotonicPublishMs;
+    }
+
+    private unsafe void CompleteCommit(byte* p)
+    {
+        // Keep the legacy counter as the last field visible to v2 readers.
+        Thread.MemoryBarrier();
+        Volatile.Write(ref *(int*)(p + OffCounter), _counter);
+
+        // Extended readers only accept the snapshot after the sequence is even.
+        Thread.MemoryBarrier();
+        _commitSequence = unchecked(_commitSequence + 1);
+        Volatile.Write(ref *(int*)(p + OffCommitSequence), _commitSequence);
+    }
+
+    private static int NextCounter(int counter)
+    {
+        int next = unchecked(counter + 1);
+        return next == 0 ? 1 : next;
+    }
+
+    private static long NextUtcTimestamp(long previous)
+    {
+        long now = DateTime.UtcNow.Ticks;
+        return previous >= now && previous < DateTime.MaxValue.Ticks
+            ? previous + 1
+            : now;
+    }
+
+    private static long NextMonotonicPublishMs(long previous)
+    {
+        long now = Environment.TickCount64;
+        return now > previous ? now : unchecked(previous + 1);
+    }
+
+    private static ulong CreateInstanceId()
+    {
+        ulong instanceId = BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(sizeof(ulong)));
+        return instanceId == 0 ? 1 : instanceId;
     }
 
     private static unsafe void WriteString(byte* dest, string? value, int maxBytes)
@@ -303,6 +490,43 @@ public sealed class BrokerSharedMemory : IDisposable
         if (_disposed) return;
         _disposed = true;
 
+        InvalidateExtension();
+        _event?.Dispose();
+        _event = null;
+        ReleaseNativeResources();
+    }
+
+    private unsafe void InvalidateExtension()
+    {
+        if (_pView == IntPtr.Zero) return;
+
+        byte* p = (byte*)_pView;
+        int current = Volatile.Read(ref *(int*)(p + OffCommitSequence));
+        Thread.MemoryBarrier();
+
+        // A writer conflict means the map may already belong to another Broker.
+        // Never invalidate an extension published by a different instance.
+        if ((current & 1) != 0 ||
+            *(int*)(p + OffExtensionMagic) != ExtensionMagicValue ||
+            *(ulong*)(p + OffInstanceId) != InstanceId)
+        {
+            return;
+        }
+
+        Thread.MemoryBarrier();
+        if (Volatile.Read(ref *(int*)(p + OffCommitSequence)) != current)
+            return;
+
+        int odd = unchecked((current & ~1) + 1);
+        Volatile.Write(ref *(int*)(p + OffCommitSequence), odd);
+        Thread.MemoryBarrier();
+        Volatile.Write(ref *(int*)(p + OffExtensionMagic), 0);
+        Thread.MemoryBarrier();
+        Volatile.Write(ref *(int*)(p + OffCommitSequence), unchecked(odd + 1));
+    }
+
+    private void ReleaseNativeResources()
+    {
         if (_pView != IntPtr.Zero)
         {
             UnmapViewOfFile(_pView);
@@ -313,6 +537,15 @@ public sealed class BrokerSharedMemory : IDisposable
             CloseHandle(_hMap);
             _hMap = IntPtr.Zero;
         }
-        _event.Dispose();
+        if (_hWriterMutex != IntPtr.Zero)
+        {
+            if (_ownsWriterMutex)
+            {
+                ReleaseMutex(_hWriterMutex);
+                _ownsWriterMutex = false;
+            }
+            CloseHandle(_hWriterMutex);
+            _hWriterMutex = IntPtr.Zero;
+        }
     }
 }

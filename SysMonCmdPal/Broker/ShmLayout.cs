@@ -12,21 +12,32 @@ internal static class ShmLayout
     // ---- Map names ----
     public const string MapName = @"Global\SysMonBrokerShm";
     public const string EventName = @"Global\SysMonBrokerEvent";
+    public const string LegacyMapName = "SysMonBrokerShm";
+    public const string LegacyEventName = "SysMonBrokerEvent";
+
+    public static IReadOnlyList<string> MapNames { get; } =
+    [
+        MapName,
+        LegacyMapName,
+    ];
 
     // ---- Magic & Version ----
     public const int MagicValue = 0x5342524B; // "SBRK"
-    public const int Version = 2;             // v2: 增加全量传感器数组
+    public const int MinimumSupportedVersion = 1;
+    public const int Version = 2;             // v2: 增加显式版本和全量传感器数组
 
     // ---- Map sizing ----
     public const int MapSize = 16384;         // 16KB (was 4096 in v1)
+    public const int LegacyMapSize = 4096;
     public const int MaxGpus = 4;
     public const int MaxSensors = 250;
 
-    // ---- v1 offsets (backward compatible) ----
+    // ---- v2 offsets ----
     public const int OffMagic = 0;            // int32
-    public const int OffVersion = 4;          // int32 (was Counter in v1, now Version)
-    public const int OffCounter = 8;          // int32 (new in v2, shifted from offset 4)
-    public const int OffCpuTemp = 16;         // double (shifted to align)
+    public const int OffVersion = 4;          // int32
+    public const int OffCounter = 8;          // int32 commit counter
+    public const int OffCommitSequence = 12;  // int32: odd writing, even committed
+    public const int OffCpuTemp = 16;         // double
     public const int OffSource = 24;          // char[32] UTF-8
     public const int OffGpuCount = 56;        // int32
     public const int OffGpuBase = 60;         // GpuEntry[MaxGpus], 72 bytes each
@@ -37,6 +48,22 @@ internal static class ShmLayout
     public const int OffSensorCount = 360;    // int32
     public const int OffSensorBase = 364;     // SensorEntry[MaxSensors], 64 bytes each
     // Sensor area ends at 364 + 250*64 = 16364
+
+    // ---- v2 compatible extension in the 20-byte map tail ----
+    public const int OffExtensionMagic = 16364;       // int32: versioned extension magic
+    public const int OffInstanceId = 16368;           // uint64 Broker process instance
+    public const int OffMonotonicPublishMs = 16376;   // int64 Environment.TickCount64
+    public const int ExtensionMagicValue = 0x31584D53; // "SMX1"
+
+    // ---- v1 offsets (no explicit version or generic sensor array) ----
+    public const int V1OffMagic = 0;          // int32
+    public const int V1OffCounter = 4;        // int32 commit counter
+    public const int V1OffCpuTemp = 8;        // double
+    public const int V1OffSource = 16;        // char[32] UTF-8
+    public const int V1OffGpuCount = 48;      // int32
+    public const int V1OffGpuBase = 52;       // GpuEntry[MaxGpus], 72 bytes each
+    public const int V1OffTimestamp = 340;    // int64 (Ticks)
+    public const int V1MinimumSize = V1OffTimestamp + sizeof(long);
 
     // ---- GPU entry layout (72 bytes each) ----
     public const int GpuNameLen = 32;         // char[32] UTF-8

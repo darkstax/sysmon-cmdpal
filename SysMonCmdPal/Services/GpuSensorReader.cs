@@ -27,15 +27,18 @@ internal static class GpuSensorReader
     public static List<GpuResult> ReadAll()
     {
         // 1. Broker 共享内存推送（最高精度）
-        var brokerSnap = BrokerPushReceiver.Instance.Snapshot;
-        if (brokerSnap.IsFresh && brokerSnap.Gpus.Count > 0)
+        var broker = BrokerPushReceiver.Instance;
+        if (broker.TryGetAvailableSnapshot(out var brokerSnap))
         {
-            return brokerSnap.Gpus
-                .OrderBy(kvp => kvp.Key)
-                .Select(kvp => kvp.Value)
-                .Select(g => new GpuResult(g.Name, g.UsagePercent, g.Temperature,
-                    g.MemoryUsedMB, g.MemoryTotalMB, "Broker"))
-                .ToList();
+            if (brokerSnap.Gpus.Count > 0)
+            {
+                return brokerSnap.Gpus
+                    .OrderBy(kvp => kvp.Key)
+                    .Select(kvp => kvp.Value)
+                    .Select(g => new GpuResult(g.Name, g.UsagePercent, g.Temperature,
+                        g.MemoryUsedMB, g.MemoryTotalMB, "Broker"))
+                    .ToList();
+            }
         }
 
         // 2. HWiNFO 共享内存（用户态）

@@ -136,22 +136,23 @@ internal sealed partial class SysMonMainPage : ListPage, IDisposable
 
     private static string GetSensorSubtitle()
     {
-        var snap = BrokerPushReceiver.Instance.Snapshot;
-        var diag = SharedMemoryReader.Diagnostics;
+        var broker = BrokerPushReceiver.Instance;
+        bool isBrokerAvailable = broker.TryGetAvailableSnapshot(out var snap);
 
-        if (snap.IsAlive && snap.IsFresh)
+        if (isBrokerAvailable)
         {
             return snap.AllSensors.Count > 0
                 ? Loc.Format("MainPage.SensorSubtitleConnected", snap.AllSensors.Count)
                 : Loc.Get("MainPage.SensorSubtitleNoData");
         }
 
-        if (diag.IsConnected && snap.LastPush != DateTime.MinValue)
+        if (snap.LastPush != DateTime.MinValue)
         {
             int seconds = Math.Max(0, (int)(DateTime.UtcNow - snap.LastPush).TotalSeconds);
             return Loc.Format("MainPage.SensorSubtitleStale", seconds);
         }
 
+        var diag = SharedMemoryReader.Diagnostics;
         if (!string.IsNullOrWhiteSpace(diag.LastError))
             return Loc.Format("MainPage.SensorSubtitleError", diag.LastError);
 
@@ -160,9 +161,13 @@ internal sealed partial class SysMonMainPage : ListPage, IDisposable
 
     private static string GetBrokerDiagnosticsSubtitle()
     {
-        var snap = BrokerPushReceiver.Instance.Snapshot;
+        var broker = BrokerPushReceiver.Instance;
+        bool isBrokerAvailable = broker.TryGetAvailableSnapshot(out var snap);
         var diag = SharedMemoryReader.Diagnostics;
         int pid = BrokerDetector.GetBrokerPid();
+
+        if (isBrokerAvailable)
+            return Loc.Format("MainPage.BrokerDiagnosticsConnected", snap.AllSensors.Count);
 
         if (pid <= 0)
             return Loc.Get("MainPage.BrokerDiagnosticsNotRunning");
@@ -170,10 +175,7 @@ internal sealed partial class SysMonMainPage : ListPage, IDisposable
         if (!diag.IsConnected)
             return Loc.Get("MainPage.BrokerDiagnosticsShmUnavailable");
 
-        if (!snap.IsFresh)
-            return Loc.Get("MainPage.BrokerDiagnosticsStale");
-
-        return Loc.Format("MainPage.BrokerDiagnosticsConnected", diag.LastSensorCount);
+        return Loc.Get("MainPage.BrokerDiagnosticsStale");
     }
 
     private static int GetDiskCount(SystemSnapshot info) =>

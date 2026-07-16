@@ -5,6 +5,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace SysMonCmdPal.Broker;
@@ -33,18 +34,24 @@ public sealed class BrokerSensorEntry
 /// <summary>Broker 推送的完整传感器快照</summary>
 public sealed class BrokerSensorSnapshot
 {
+    internal static readonly TimeSpan AvailabilityTimeout = TimeSpan.FromSeconds(5);
+
     public double CpuTemperature { get; init; } = -1;
     public string CpuSource { get; init; } = "";
     public ConcurrentDictionary<int, BrokerGpuSnapshot> Gpus { get; init; } = new();
     public IReadOnlyList<BrokerSensorEntry> AllSensors { get; init; } = [];
     public DateTime LastPush { get; init; } = DateTime.MinValue;
     public DateTime LastPing { get; init; } = DateTime.MinValue;
+    internal long LastDataTimestamp { get; init; }
+    internal long LastAvailableTimestamp { get; init; }
 
-    /// <summary>数据是否新鲜（10 秒内有更新）</summary>
-    public bool IsFresh => (DateTime.UtcNow - LastPush).TotalSeconds < 10;
+    /// <summary>Broker 快照是否仍可用。仅使用单调时钟，不受系统时间调整影响。</summary>
+    public bool IsUsable => LastAvailableTimestamp > 0 &&
+        Stopwatch.GetElapsedTime(LastAvailableTimestamp) < AvailabilityTimeout;
 
-    /// <summary>Broker 是否存活（5 秒内有心跳）</summary>
-    public bool IsAlive => (DateTime.UtcNow - LastPing).TotalSeconds < 5;
+    // Compatibility aliases. All callers observe the same runtime health state.
+    public bool IsFresh => IsUsable;
+    public bool IsAlive => IsUsable;
 }
 
 /// <summary>
@@ -68,13 +75,24 @@ public sealed class BrokerPushReceiver : ISysMonBrokerPush
         get { lock (_lock) return _snapshot; }
     }
 
-    public bool IsBrokerAvailable => Snapshot.IsAlive && Snapshot.IsFresh;
+    public bool IsBrokerAvailable => Snapshot.IsUsable;
+    public bool IsUsable => IsBrokerAvailable;
+
+    public bool TryGetAvailableSnapshot(out BrokerSensorSnapshot snapshot)
+    {
+        lock (_lock)
+        {
+            snapshot = _snapshot;
+            return snapshot.IsUsable;
+        }
+    }
 
     public void PushSnapshot(double cpuTemperature, string cpuSource,
         IEnumerable<KeyValuePair<int, BrokerGpuSnapshot>> gpus,
         IReadOnlyList<BrokerSensorEntry> sensors)
     {
         var now = DateTime.UtcNow;
+        long timestamp = Stopwatch.GetTimestamp();
         lock (_lock)
         {
             _snapshot = new BrokerSensorSnapshot
@@ -85,7 +103,21 @@ public sealed class BrokerPushReceiver : ISysMonBrokerPush
                 AllSensors = sensors,
                 LastPush = now,
                 LastPing = now,
+                LastDataTimestamp = timestamp,
+                LastAvailableTimestamp = timestamp,
             };
+        }
+    }
+
+    internal void MarkUnavailable()
+    {
+        lock (_lock)
+        {
+            var old = _snapshot;
+            if (old.LastAvailableTimestamp == 0)
+                return;
+
+            _snapshot = CopySnapshot(old, lastAvailableTimestamp: 0);
         }
     }
 
@@ -93,6 +125,8 @@ public sealed class BrokerPushReceiver : ISysMonBrokerPush
 
     public void PushCpuTemp(double celsius, string source)
     {
+        var now = DateTime.UtcNow;
+        long timestamp = Stopwatch.GetTimestamp();
         lock (_lock)
         {
             var old = _snapshot;
@@ -102,8 +136,10 @@ public sealed class BrokerPushReceiver : ISysMonBrokerPush
                 CpuSource = source,
                 Gpus = old.Gpus,
                 AllSensors = old.AllSensors,
-                LastPush = DateTime.UtcNow,
+                LastPush = now,
                 LastPing = old.LastPing,
+                LastDataTimestamp = timestamp,
+                LastAvailableTimestamp = old.LastAvailableTimestamp,
             };
         }
     }
@@ -111,6 +147,8 @@ public sealed class BrokerPushReceiver : ISysMonBrokerPush
     public void PushGpuData(int gpuIndex, string name, double tempCelsius,
         double usagePercent, double memUsedMB, double memTotalMB)
     {
+        var now = DateTime.UtcNow;
+        long timestamp = Stopwatch.GetTimestamp();
         var gpu = new BrokerGpuSnapshot
         {
             Name = name,
@@ -118,7 +156,7 @@ public sealed class BrokerPushReceiver : ISysMonBrokerPush
             UsagePercent = usagePercent,
             MemoryUsedMB = memUsedMB,
             MemoryTotalMB = memTotalMB,
-            Timestamp = DateTime.UtcNow,
+            Timestamp = now,
         };
 
         lock (_lock)
@@ -133,8 +171,10 @@ public sealed class BrokerPushReceiver : ISysMonBrokerPush
                 CpuSource = old.CpuSource,
                 Gpus = newGpus,
                 AllSensors = old.AllSensors,
-                LastPush = DateTime.UtcNow,
+                LastPush = now,
                 LastPing = old.LastPing,
+                LastDataTimestamp = timestamp,
+                LastAvailableTimestamp = old.LastAvailableTimestamp,
             };
         }
     }
@@ -142,6 +182,8 @@ public sealed class BrokerPushReceiver : ISysMonBrokerPush
     /// <summary>推送全量传感器数据（v2 新增）</summary>
     public void PushAllSensors(IReadOnlyList<BrokerSensorEntry> sensors)
     {
+        var now = DateTime.UtcNow;
+        long timestamp = Stopwatch.GetTimestamp();
         lock (_lock)
         {
             var old = _snapshot;
@@ -151,14 +193,18 @@ public sealed class BrokerPushReceiver : ISysMonBrokerPush
                 CpuSource = old.CpuSource,
                 Gpus = old.Gpus,
                 AllSensors = sensors,
-                LastPush = DateTime.UtcNow,
+                LastPush = now,
                 LastPing = old.LastPing,
+                LastDataTimestamp = timestamp,
+                LastAvailableTimestamp = old.LastAvailableTimestamp,
             };
         }
     }
 
     public void Ping()
     {
+        var now = DateTime.UtcNow;
+        long timestamp = Stopwatch.GetTimestamp();
         lock (_lock)
         {
             var old = _snapshot;
@@ -169,8 +215,29 @@ public sealed class BrokerPushReceiver : ISysMonBrokerPush
                 Gpus = old.Gpus,
                 AllSensors = old.AllSensors,
                 LastPush = old.LastPush,
-                LastPing = DateTime.UtcNow,
+                LastPing = now,
+                LastDataTimestamp = old.LastDataTimestamp,
+                LastAvailableTimestamp = IsRecentData(old.LastDataTimestamp)
+                    ? timestamp
+                    : 0,
             };
         }
     }
+
+    private static bool IsRecentData(long timestamp) =>
+        timestamp > 0 && Stopwatch.GetElapsedTime(timestamp) < TimeSpan.FromSeconds(10);
+
+    private static BrokerSensorSnapshot CopySnapshot(
+        BrokerSensorSnapshot source,
+        long lastAvailableTimestamp) => new()
+        {
+            CpuTemperature = source.CpuTemperature,
+            CpuSource = source.CpuSource,
+            Gpus = source.Gpus,
+            AllSensors = source.AllSensors,
+            LastPush = source.LastPush,
+            LastPing = source.LastPing,
+            LastDataTimestamp = source.LastDataTimestamp,
+            LastAvailableTimestamp = lastAvailableTimestamp,
+        };
 }

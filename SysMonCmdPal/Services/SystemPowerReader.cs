@@ -22,8 +22,9 @@ internal static class SystemPowerReader
     public static SystemPowerResult Read()
     {
         // 1. Broker 共享内存（LHM 全量传感器）
-        var brokerSnap = BrokerPushReceiver.Instance.Snapshot;
-        if (brokerSnap.IsFresh && brokerSnap.AllSensors.Count > 0)
+        var broker = BrokerPushReceiver.Instance;
+        bool isBrokerAvailable = broker.TryGetAvailableSnapshot(out var brokerSnap);
+        if (isBrokerAvailable && brokerSnap.AllSensors.Count > 0)
         {
             double cpuPower = 0;
             var gpuByHardware = new System.Collections.Generic.Dictionary<int, double>();

@@ -43,13 +43,15 @@ internal sealed partial class SensorDockBand : WrappedDockItem
 
     private void OnRefresh()
     {
-        ApplySnapshot(BrokerPushReceiver.Instance.Snapshot);
+        var broker = BrokerPushReceiver.Instance;
+        bool isBrokerAvailable = broker.TryGetAvailableSnapshot(out var snapshot);
+        ApplySnapshot(snapshot, isBrokerAvailable);
         Items = [_sensorItem];
     }
 
-    internal void ApplySnapshot(BrokerSensorSnapshot snap)
+    internal void ApplySnapshot(BrokerSensorSnapshot snap, bool isBrokerAvailable)
     {
-        if (!(snap.IsAlive && snap.IsFresh))
+        if (!isBrokerAvailable)
         {
             _sensorItem.Title = _key.Name;
             _sensorItem.Subtitle = snap.LastPush == DateTime.MinValue

@@ -266,6 +266,72 @@ function Stop-OwnedBrokerProcesses {
     }
 }
 
+function Wait-BrokerSharedMemoryHealthy([DateTime]$Deadline) {
+    $baseline = $null
+    while ([DateTime]::UtcNow -lt $Deadline) {
+        $mmf = $null
+        $accessor = $null
+        try {
+            $mmf = [IO.MemoryMappedFiles.MemoryMappedFile]::OpenExisting(
+                'Global\SysMonBrokerShm',
+                [IO.MemoryMappedFiles.MemoryMappedFileRights]::Read)
+            $accessor = $mmf.CreateViewAccessor(
+                0,
+                16384,
+                [IO.MemoryMappedFiles.MemoryMappedFileAccess]::Read)
+
+            $sequenceBefore = $accessor.ReadInt32(12)
+            if (($sequenceBefore -band 1) -ne 0) {
+                Start-Sleep -Milliseconds 50
+                continue
+            }
+
+            $magic = $accessor.ReadInt32(0)
+            $version = $accessor.ReadInt32(4)
+            $counter = $accessor.ReadInt32(8)
+            $extensionMagic = $accessor.ReadInt32(16364)
+            $instanceId = $accessor.ReadUInt64(16368)
+            $publishMs = $accessor.ReadInt64(16376)
+            $sequenceAfter = $accessor.ReadInt32(12)
+
+            $stable = $sequenceBefore -eq $sequenceAfter -and
+                ($sequenceAfter -band 1) -eq 0
+            $valid = $stable -and
+                $magic -eq 0x5342524B -and
+                $version -eq 2 -and
+                $extensionMagic -eq 0x31584D53 -and
+                $instanceId -ne 0 -and
+                $publishMs -gt 0
+
+            if ($valid) {
+                if ($baseline -and
+                    $baseline.InstanceId -eq $instanceId -and
+                    $baseline.Counter -ne $counter -and
+                    $publishMs -gt $baseline.PublishMs) {
+                    return
+                }
+
+                $baseline = [PSCustomObject]@{
+                    InstanceId = $instanceId
+                    Counter = $counter
+                    PublishMs = $publishMs
+                }
+            }
+        } catch [IO.FileNotFoundException] {
+            $baseline = $null
+        } catch [UnauthorizedAccessException] {
+            throw 'The installed Broker shared memory is not readable.'
+        } finally {
+            if ($accessor) { $accessor.Dispose() }
+            if ($mmf) { $mmf.Dispose() }
+        }
+
+        Start-Sleep -Milliseconds 250
+    }
+
+    throw 'The installed Broker did not publish advancing shared-memory data.'
+}
+
 function Get-ArpSnapshot {
     $base = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($arpBasePath, $false)
     if (-not $base) { return $null }
@@ -477,6 +543,7 @@ try {
         }
     }
     if (-not $healthyProcess) { throw 'The scheduled Broker process failed path validation.' }
+    Wait-BrokerSharedMemoryHealthy ([DateTime]::UtcNow.AddSeconds(30))
     Assert-SystemTaskModel (Get-ScheduledTask -TaskName $taskName -ErrorAction Stop)
 
     if ($hadOldUninstall) {

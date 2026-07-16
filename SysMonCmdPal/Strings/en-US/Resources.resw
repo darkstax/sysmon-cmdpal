@@ -550,11 +550,32 @@ No battery detected (desktop or virtual machine).</value>
   <data name="BrokerDiagnostics.DataFresh" xml:space="preserve">
     <value>Data fresh</value>
   </data>
+  <data name="BrokerDiagnostics.BrokerUsable" xml:space="preserve">
+    <value>Broker usable</value>
+  </data>
+  <data name="BrokerDiagnostics.ProtocolValid" xml:space="preserve">
+    <value>Protocol valid</value>
+  </data>
+  <data name="BrokerDiagnostics.Stalled" xml:space="preserve">
+    <value>Commit stalled</value>
+  </data>
+  <data name="BrokerDiagnostics.MapName" xml:space="preserve">
+    <value>Shared memory map</value>
+  </data>
   <data name="BrokerDiagnostics.Version" xml:space="preserve">
     <value>SHM version</value>
   </data>
   <data name="BrokerDiagnostics.Counter" xml:space="preserve">
     <value>Counter</value>
+  </data>
+  <data name="BrokerDiagnostics.CommitSequence" xml:space="preserve">
+    <value>Commit sequence</value>
+  </data>
+  <data name="BrokerDiagnostics.InstanceId" xml:space="preserve">
+    <value>Broker instance</value>
+  </data>
+  <data name="BrokerDiagnostics.RestartCount" xml:space="preserve">
+    <value>Detected restarts</value>
   </data>
   <data name="BrokerDiagnostics.SensorCount" xml:space="preserve">
     <value>Sensor count</value>
@@ -564,6 +585,9 @@ No battery detected (desktop or virtual machine).</value>
   </data>
   <data name="BrokerDiagnostics.LastRead" xml:space="preserve">
     <value>Last SHM read</value>
+  </data>
+  <data name="BrokerDiagnostics.LastCommit" xml:space="preserve">
+    <value>Last valid commit</value>
   </data>
   <data name="BrokerDiagnostics.LastPush" xml:space="preserve">
     <value>Last snapshot push</value>

@@ -18,9 +18,12 @@ internal static class CpuSensorReader
     public static CpuTempResult Read()
     {
         // 1. Broker 共享内存推送（最高精度，需 SysMonBroker 以管理员运行）
-        var brokerSnap = BrokerPushReceiver.Instance.Snapshot;
-        if (brokerSnap.IsFresh && brokerSnap.CpuTemperature > 0)
-            return new CpuTempResult(brokerSnap.CpuTemperature, brokerSnap.CpuSource);
+        var broker = BrokerPushReceiver.Instance;
+        if (broker.TryGetAvailableSnapshot(out var brokerSnap))
+        {
+            if (brokerSnap.CpuTemperature > 0)
+                return new CpuTempResult(brokerSnap.CpuTemperature, brokerSnap.CpuSource);
+        }
 
         // 2. HWiNFO 共享内存（用户态，不需要管理员权限）
         var hwinfo = HwinfoSharedMemoryReader.Instance;

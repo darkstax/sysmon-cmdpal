@@ -50,6 +50,33 @@ public class BrokerElevationSecurityTests
     }
 
     [Fact]
+    public void InstallerScript_RequiresStableAdvancingV2SharedMemoryAfterProcessValidation()
+    {
+        string script = BuildInstallerScript();
+
+        Assert.Contains("function Wait-BrokerSharedMemoryHealthy([DateTime]$Deadline)", script);
+        Assert.Contains("$sequenceBefore = $accessor.ReadInt32(12)", script);
+        Assert.Contains("if (($sequenceBefore -band 1) -ne 0)", script);
+        Assert.Contains("$sequenceAfter = $accessor.ReadInt32(12)", script);
+        Assert.Contains("$sequenceBefore -eq $sequenceAfter", script);
+        Assert.Contains("($sequenceAfter -band 1) -eq 0", script);
+        Assert.Contains("$magic -eq 0x5342524B", script);
+        Assert.Contains("$version -eq 2", script);
+        Assert.Contains("$extensionMagic -eq 0x31584D53", script);
+        Assert.Contains("$instanceId -ne 0", script);
+        Assert.Contains("$publishMs -gt 0", script);
+        Assert.Contains("$baseline.InstanceId -eq $instanceId", script);
+        Assert.Contains("$baseline.Counter -ne $counter", script);
+        Assert.Contains("$publishMs -gt $baseline.PublishMs", script);
+
+        AssertOrdered(
+            script,
+            "if (-not $healthyProcess) { throw 'The scheduled Broker process failed path validation.' }",
+            "Wait-BrokerSharedMemoryHealthy ([DateTime]::UtcNow.AddSeconds(30))",
+            "Assert-SystemTaskModel (Get-ScheduledTask -TaskName $taskName -ErrorAction Stop)");
+    }
+
+    [Fact]
     public void InstallerScript_BacksUpAndRollsBackManagedExeAndTask()
     {
         string script = BuildInstallerScript();
@@ -177,6 +204,17 @@ public class BrokerElevationSecurityTests
             Sha256,
             Architecture.X64,
             UserSid);
+
+    private static void AssertOrdered(string text, params string[] fragments)
+    {
+        int previousIndex = -1;
+        foreach (string fragment in fragments)
+        {
+            int index = text.IndexOf(fragment, previousIndex + 1, StringComparison.Ordinal);
+            Assert.True(index >= 0, $"Expected script fragment after index {previousIndex}: {fragment}");
+            previousIndex = index;
+        }
+    }
 
     private sealed class ThrowingUninstaller : IBrokerUninstaller
     {

@@ -30,10 +30,11 @@ internal sealed partial class SensorListPage : ListPage, IDisposable
     public override IListItem[] GetItems()
     {
         EnsureSubscribed();
-        var snap = BrokerPushReceiver.Instance.Snapshot;
-        if (!(snap.IsAlive && snap.IsFresh) || snap.AllSensors.Count == 0)
+        var broker = BrokerPushReceiver.Instance;
+        bool isBrokerAvailable = broker.TryGetAvailableSnapshot(out var snap);
+        if (!isBrokerAvailable || snap.AllSensors.Count == 0)
         {
-            return [PageNavigation.BackListItem(Dispose), .. CreateNoDataItems(snap)];
+            return [PageNavigation.BackListItem(Dispose), .. CreateNoDataItems(snap, isBrokerAvailable)];
         }
 
         var items = new List<IListItem>(ShmLayout.BrowseCategories.Count + snap.AllSensors.Count);
@@ -109,32 +110,35 @@ internal sealed partial class SensorListPage : ListPage, IDisposable
         }
     }
 
-    internal static IListItem[] CreateNoDataItems(BrokerSensorSnapshot snap)
+    internal static IListItem[] CreateNoDataItems(
+        BrokerSensorSnapshot snap,
+        bool isBrokerAvailable)
     {
         return
         [
             new ListItem(new NoOpCommand())
             {
                 Title = Loc.Get("Sensor.NoData"),
-                Subtitle = GetNoDataSubtitle(snap),
+                Subtitle = GetNoDataSubtitle(snap, isBrokerAvailable),
                 Icon = new IconInfo(SysMonIcons.SensorUnavailable),
             }
         ];
     }
 
-    private static string GetNoDataSubtitle(BrokerSensorSnapshot snap)
+    private static string GetNoDataSubtitle(
+        BrokerSensorSnapshot snap,
+        bool isBrokerAvailable)
     {
-        var diag = SharedMemoryReader.Diagnostics;
-
-        if (snap.IsAlive && snap.IsFresh)
+        if (isBrokerAvailable)
             return Loc.Get("Sensor.NoDataAlive");
 
-        if (diag.IsConnected && snap.LastPush != DateTime.MinValue)
+        if (snap.LastPush != DateTime.MinValue)
         {
             int seconds = Math.Max(0, (int)(DateTime.UtcNow - snap.LastPush).TotalSeconds);
             return Loc.Format("Sensor.NoDataStale", seconds);
         }
 
+        var diag = SharedMemoryReader.Diagnostics;
         if (!string.IsNullOrWhiteSpace(diag.LastError))
             return Loc.Format("Sensor.NoDataError", diag.LastError);
 
@@ -244,10 +248,11 @@ internal sealed partial class SensorCategoryPage : ListPage
 
     public override IListItem[] GetItems()
     {
-        var snap = BrokerPushReceiver.Instance.Snapshot;
-        if (!(snap.IsAlive && snap.IsFresh) || snap.AllSensors.Count == 0)
+        var broker = BrokerPushReceiver.Instance;
+        bool isBrokerAvailable = broker.TryGetAvailableSnapshot(out var snap);
+        if (!isBrokerAvailable || snap.AllSensors.Count == 0)
         {
-            return [PageNavigation.BackListItem(), .. SensorListPage.CreateNoDataItems(snap)];
+            return [PageNavigation.BackListItem(), .. SensorListPage.CreateNoDataItems(snap, isBrokerAvailable)];
         }
 
         var sensors = snap.AllSensors

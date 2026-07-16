@@ -3,6 +3,9 @@
 
 using System;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace SysMonCmdPal.Broker;
 
@@ -10,16 +13,14 @@ namespace SysMonCmdPal.Broker;
 public static class BrokerDetector
 {
     private const string BrokerProcessName = "SysMonBroker";
+    private const uint ProcessQueryLimitedInformation = 0x1000;
 
     /// <summary>SysMonBroker 进程是否正在运行</summary>
     public static bool IsBrokerRunning()
     {
         try
         {
-            var processes = Process.GetProcessesByName(BrokerProcessName);
-            bool running = processes.Length > 0;
-            foreach (var p in processes) p.Dispose();
-            return running;
+            return GetBrokerPidCore() > 0;
         }
         catch (Exception ex)
         {
@@ -33,11 +34,59 @@ public static class BrokerDetector
     {
         try
         {
-            var processes = Process.GetProcessesByName(BrokerProcessName);
-            int pid = processes.Length > 0 ? processes[0].Id : -1;
-            foreach (var p in processes) p.Dispose();
-            return pid;
+            return GetBrokerPidCore();
         }
         catch { return -1; }
     }
+
+    private static int GetBrokerPidCore()
+    {
+        string expectedPath = Path.GetFullPath(global::SysMonCmdPal.BrokerInstaller.BrokerPath);
+        foreach (Process process in Process.GetProcessesByName(BrokerProcessName))
+        {
+            using (process)
+            {
+                string? processPath = TryGetProcessPath(process.Id);
+                if (processPath != null && string.Equals(
+                    Path.GetFullPath(processPath),
+                    expectedPath,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    return process.Id;
+                }
+            }
+        }
+
+        return -1;
+    }
+
+    private static string? TryGetProcessPath(int processId)
+    {
+        using SafeProcessHandle handle = OpenProcess(
+            ProcessQueryLimitedInformation,
+            bInheritHandle: false,
+            processId);
+        if (handle.IsInvalid)
+            return null;
+
+        var path = new StringBuilder(32768);
+        int length = path.Capacity;
+        return QueryFullProcessImageName(handle, 0, path, ref length)
+            ? path.ToString(0, length)
+            : null;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeProcessHandle OpenProcess(
+        uint dwDesiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle,
+        int dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryFullProcessImageName(
+        SafeProcessHandle hProcess,
+        uint dwFlags,
+        StringBuilder lpExeName,
+        ref int lpdwSize);
 }

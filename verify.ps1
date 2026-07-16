@@ -6,9 +6,11 @@ $TaskName = "SysMonBroker"
 $BrokerExe = Join-Path $env:ProgramFiles "SysMonCmdPal\Broker\SysMonBroker.exe"
 
 function Format-TaskResult {
-    param([int]$Result)
+    param([long]$Result)
 
-    $label = switch ($Result) {
+    $unsignedResult = [uint32]$Result
+
+    $label = switch ($unsignedResult) {
         0 { "Success"; break }
         267008 { "Ready"; break }      # 0x41300
         267009 { "Running"; break }    # 0x41301
@@ -22,7 +24,7 @@ function Format-TaskResult {
         default { "Unknown" }
     }
 
-    return ("{0} (0x{0:X8}, {1})" -f $Result, $label)
+    return ("{0} (0x{1:X8}, {2})" -f $Result, $unsignedResult, $label)
 }
 
 Write-Host "=== Package Count Check ===" -ForegroundColor Cyan
@@ -63,6 +65,9 @@ if ($task) {
         Write-Host "  Execute: $($a.Execute)"
         Write-Host "  WorkingDirectory: $($a.WorkingDirectory)"
     }
+    Write-Host "  Principal: $($task.Principal.UserId)"
+    Write-Host "  LogonType: $($task.Principal.LogonType)"
+    Write-Host "  RunLevel: $($task.Principal.RunLevel)"
 
     if ($task.Actions[0].Execute -ieq $BrokerExe) {
         Write-Host "  Broker path OK" -ForegroundColor Green
@@ -118,16 +123,45 @@ try {
         "Global\SysMonBrokerShm",
         [System.IO.MemoryMappedFiles.MemoryMappedFileRights]::Read)
     try {
-        $accessor = $mmf.CreateViewAccessor(0, 384, [System.IO.MemoryMappedFiles.MemoryMappedFileAccess]::Read)
+        $accessor = $mmf.CreateViewAccessor(0, 16384, [System.IO.MemoryMappedFiles.MemoryMappedFileAccess]::Read)
         try {
             $magic = $accessor.ReadInt32(0)
             $version = $accessor.ReadInt32(4)
             $counter = $accessor.ReadInt32(8)
+            $sequence = $accessor.ReadInt32(12)
             $sensorCount = $accessor.ReadInt32(360)
+            $extensionMagic = $accessor.ReadInt32(16364)
+            $instanceId = $accessor.ReadUInt64(16368)
+            $publishMs = $accessor.ReadInt64(16376)
             Write-Host ("  Magic: 0x{0:X8}" -f $magic) -ForegroundColor $(if ($magic -eq 0x5342524B) { "Green" } else { "Red" })
             Write-Host "  Version: $version"
             Write-Host "  Counter: $counter"
             Write-Host "  Sensor count: $sensorCount"
+            Write-Host "  Commit sequence: $sequence" -ForegroundColor $(if (($sequence -band 1) -eq 0) { "Green" } else { "Red" })
+            Write-Host ("  Extension: 0x{0:X8}" -f $extensionMagic) -ForegroundColor $(if ($extensionMagic -eq 0x31584D53) { "Green" } else { "Yellow" })
+
+            if ($extensionMagic -eq 0x31584D53) {
+                Write-Host ("  Broker instance: 0x{0:X16}" -f $instanceId)
+                Write-Host "  Monotonic publish ms: $publishMs"
+                Write-Host "  Waiting 3 seconds to verify live commits..."
+                Start-Sleep -Seconds 3
+
+                $sequenceAfter = $accessor.ReadInt32(12)
+                $counterAfter = $accessor.ReadInt32(8)
+                $instanceAfter = $accessor.ReadUInt64(16368)
+                $publishAfter = $accessor.ReadInt64(16376)
+                $counterAdvanced = $counterAfter -ne $counter
+                $publishAdvanced = $publishAfter -gt $publishMs
+                $instanceStable = $instanceAfter -eq $instanceId
+                $sequenceCommitted = ($sequenceAfter -band 1) -eq 0
+
+                Write-Host "  Counter after wait: $counterAfter" -ForegroundColor $(if ($counterAdvanced) { "Green" } else { "Red" })
+                Write-Host "  Commit sequence after wait: $sequenceAfter" -ForegroundColor $(if ($sequenceCommitted) { "Green" } else { "Red" })
+                Write-Host "  Instance stable: $instanceStable" -ForegroundColor $(if ($instanceStable) { "Green" } else { "Red" })
+                Write-Host "  Publish time advanced: $publishAdvanced" -ForegroundColor $(if ($publishAdvanced) { "Green" } else { "Red" })
+            } else {
+                Write-Host "  Legacy Broker protocol detected; stable-commit verification unavailable" -ForegroundColor Yellow
+            }
         } finally {
             $accessor.Dispose()
         }
