@@ -7,16 +7,29 @@ public sealed partial class SensorCollector
 {
     private void CollectSensorsFromHardware(IHardware hw, List<SensorEntry> results, int packedHwTag)
     {
+        // R09: a single misbehaving sensor getter must not stall the whole collection;
+        // it is skipped and the remaining sensors/hardware keep publishing.
         foreach (var sensor in hw.Sensors)
         {
-            var entry = TryCreateEntry(hw.HardwareType, sensor, packedHwTag);
-            if (entry != null) results.Add(entry);
+            try
+            {
+                var entry = TryCreateEntry(hw.HardwareType, sensor, packedHwTag);
+                if (entry != null) results.Add(entry);
+            }
+            catch
+            {
+                // skip this sensor only
+            }
         }
 
         foreach (var sub in hw.SubHardware)
         {
             try { sub.Update(); }
-            catch { continue; }
+            catch (Exception ex)
+            {
+                LogUpdateError(sub, ex); // R09: rate-limited, includes sub-hardware name
+                continue;
+            }
             CollectSensorsFromHardware(sub, results, packedHwTag);
         }
     }

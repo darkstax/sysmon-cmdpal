@@ -20,20 +20,24 @@ public sealed partial class SensorCollector
 
     private static GpuReading? ExtractGpuReading(IHardware gpu)
     {
-        double temp = FindSensorValue(gpu, SensorType.Temperature, "Core")
+        double temp = NormalizeGpuValue(FindSensorValue(gpu, SensorType.Temperature, "Core")
             ?? FindSensorValue(gpu, SensorType.Temperature, "SoC")
             ?? FindSensorValue(gpu, SensorType.Temperature, "Hot Spot")
-            ?? -1;
+            ?? -1);
 
-        double load = FindSensorValue(gpu, SensorType.Load, "GPU Core")
+        double load = NormalizeGpuValue(FindSensorValue(gpu, SensorType.Load, "GPU Core")
             ?? FindSensorValue(gpu, SensorType.Load, "Core")
-            ?? -1;
+            ?? -1);
 
-        double memUsed = FindSensorValue(gpu, SensorType.SmallData, "Memory Used") ?? 0;
-        double memTotal = FindSensorValue(gpu, SensorType.SmallData, "Memory Total") ?? 0;
+        double memUsed = NormalizeGpuValue(FindSensorValue(gpu, SensorType.SmallData, "Memory Used") ?? 0);
+        double memTotal = NormalizeGpuValue(FindSensorValue(gpu, SensorType.SmallData, "Memory Total") ?? 0);
 
         return new GpuReading(gpu.Name, temp, load, memUsed, memTotal);
     }
+
+    /// <summary>R10: never write NaN/Infinity/negative GPU readings to SHM — normalize to -1 (same as sensor entries).</summary>
+    private static double NormalizeGpuValue(double value) =>
+        double.IsNaN(value) || double.IsInfinity(value) || value < 0 ? -1 : value;
 
     private static float? FindSensorValue(IHardware hw, SensorType type, string nameContains) =>
         hw.Sensors.FirstOrDefault(s => s.SensorType == type

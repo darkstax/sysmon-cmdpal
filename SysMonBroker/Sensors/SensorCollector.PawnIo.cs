@@ -6,10 +6,21 @@ public sealed partial class SensorCollector
 {
     private static bool CheckPawnIoInstalled()
     {
+        // R11: registry access may throw (permissions, redirection); treat any failure as
+        // "not installed" so the broker falls back to LHM user-mode sensors.
         const string key = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO";
-        if (TryReadVersion(Registry.LocalMachine, key)) return true;
-        using var hklm64 = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
-        return TryReadVersion(hklm64, key);
+        try
+        {
+            if (TryReadVersion(Registry.LocalMachine, key)) return true;
+            using var hklm64 = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+            return TryReadVersion(hklm64, key);
+        }
+        catch (Exception ex)
+        {
+            SysMonBroker.Logging.BrokerLogger.Log(
+                $"sensor: PawnIO registry probe failed ({ex.GetType().Name}: {ex.Message}); treating as not installed");
+            return false;
+        }
     }
 
     private static bool TryReadVersion(RegistryKey root, string subkeyPath)
