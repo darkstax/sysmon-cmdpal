@@ -216,10 +216,25 @@ public sealed class BrokerSharedMemory : IDisposable
         }
         catch
         {
-            InvalidateExtension();
-            _event?.Dispose();
-            _event = null;
-            ReleaseNativeResources();
+            // R13: 嵌套 try/finally 保证各清理步骤按序执行——即使
+            // InvalidateExtension() 或 _event.Dispose() 抛异常，后续步骤仍会
+            // 执行，不会泄漏原生句柄。
+            try
+            {
+                InvalidateExtension();
+            }
+            finally
+            {
+                try
+                {
+                    _event?.Dispose();
+                    _event = null;
+                }
+                finally
+                {
+                    ReleaseNativeResources();
+                }
+            }
             throw;
         }
     }
@@ -347,47 +362,72 @@ public sealed class BrokerSharedMemory : IDisposable
         byte* p = (byte*)_pView;
 
         EnsureWriterOwnership(p);
-        BeginCommit(p);
 
-        _counter = NextCounter(_counter);
-        _lastUtcTimestamp = NextUtcTimestamp(_lastUtcTimestamp);
-        _lastMonotonicPublishMs = NextMonotonicPublishMs(_lastMonotonicPublishMs);
+        // R12: _counter/_lastMonotonicPublishMs/_commitSequence 在 BeginCommit 与
+        // CompleteCommit 之间推进；若其间抛异常（OOM/ThreadAbort），字段会与 SHM
+        // 永久失配，下一周期 EnsureWriterOwnership 校验失败并误报
+        // BrokerWriterConflictException。此处保存旧值，异常时回滚字段与 SHM 提交
+        // 序列（撤销 BeginCommit 写下的 odd 标记），保证下一周期自愈。
+        int savedCounter = _counter;
+        long savedUtcTimestamp = _lastUtcTimestamp;
+        long savedMonotonicPublishMs = _lastMonotonicPublishMs;
+        int savedCommitSequence = _commitSequence;
 
-        *(int*)(p + OffMagic) = MagicValue;
-        *(int*)(p + OffVersion) = MapVersion;
-
-        *(double*)(p + OffCpuTemp) = cpuTemp;
-        WriteString(p + OffSource, source, 32);
-
-        int gpuCount = Math.Min(gpus.Count, MaxGpus);
-        *(int*)(p + OffGpuCount) = gpuCount;
-        for (int i = 0; i < gpuCount; i++)
+        try
         {
-            byte* gpuPtr = p + OffGpuBase + (i * GpuEntrySize);
-            WriteString(gpuPtr, gpus[i].Name, GpuNameLen);
-            *(double*)(gpuPtr + GpuTempOff) = gpus[i].TempCelsius;
-            *(double*)(gpuPtr + GpuUsageOff) = gpus[i].UsagePercent;
-            *(double*)(gpuPtr + GpuMemUsedOff) = gpus[i].MemUsedMB;
-            *(double*)(gpuPtr + GpuMemTotalOff) = gpus[i].MemTotalMB;
+            BeginCommit(p);
+
+            _counter = NextCounter(_counter);
+            _lastUtcTimestamp = NextUtcTimestamp(_lastUtcTimestamp);
+            _lastMonotonicPublishMs = NextMonotonicPublishMs(_lastMonotonicPublishMs);
+
+            *(int*)(p + OffMagic) = MagicValue;
+            *(int*)(p + OffVersion) = MapVersion;
+
+            *(double*)(p + OffCpuTemp) = cpuTemp;
+            WriteString(p + OffSource, source, 32);
+
+            int gpuCount = Math.Min(gpus.Count, MaxGpus);
+            *(int*)(p + OffGpuCount) = gpuCount;
+            for (int i = 0; i < gpuCount; i++)
+            {
+                byte* gpuPtr = p + OffGpuBase + (i * GpuEntrySize);
+                WriteString(gpuPtr, gpus[i].Name, GpuNameLen);
+                *(double*)(gpuPtr + GpuTempOff) = gpus[i].TempCelsius;
+                *(double*)(gpuPtr + GpuUsageOff) = gpus[i].UsagePercent;
+                *(double*)(gpuPtr + GpuMemUsedOff) = gpus[i].MemUsedMB;
+                *(double*)(gpuPtr + GpuMemTotalOff) = gpus[i].MemTotalMB;
+            }
+
+            *(long*)(p + OffTimestamp) = _lastUtcTimestamp;
+
+            int sensorCount = Math.Min(sensors.Count, MaxSensors);
+            *(int*)(p + OffSensorCount) = sensorCount;
+            for (int i = 0; i < sensorCount; i++)
+            {
+                byte* sPtr = p + OffSensorBase + (i * SensorEntrySize);
+                var s = sensors[i];
+                *(int*)(sPtr + SensorTagOff) = s.Tag;
+                WriteString(sPtr + SensorNameOff, s.Name, 32);
+                *(double*)(sPtr + SensorValueOff) = s.Value;
+                WriteString(sPtr + SensorUnitOff, s.Unit, 16);
+                *(int*)(sPtr + SensorHwOff) = s.HardwareTag;
+            }
+
+            WriteExtension(p);
+            CompleteCommit(p);
         }
-
-        *(long*)(p + OffTimestamp) = _lastUtcTimestamp;
-
-        int sensorCount = Math.Min(sensors.Count, MaxSensors);
-        *(int*)(p + OffSensorCount) = sensorCount;
-        for (int i = 0; i < sensorCount; i++)
+        catch
         {
-            byte* sPtr = p + OffSensorBase + (i * SensorEntrySize);
-            var s = sensors[i];
-            *(int*)(sPtr + SensorTagOff) = s.Tag;
-            WriteString(sPtr + SensorNameOff, s.Name, 32);
-            *(double*)(sPtr + SensorValueOff) = s.Value;
-            WriteString(sPtr + SensorUnitOff, s.Unit, 16);
-            *(int*)(sPtr + SensorHwOff) = s.HardwareTag;
+            // 回滚字段与 SHM 提交序列，恢复到 Write() 入口时的一致状态
+            // （even 提交值），下一周期 BeginCommit 的 (seq & ~1) + 1 正常推进。
+            _counter = savedCounter;
+            _lastUtcTimestamp = savedUtcTimestamp;
+            _lastMonotonicPublishMs = savedMonotonicPublishMs;
+            _commitSequence = savedCommitSequence;
+            Volatile.Write(ref *(int*)(p + OffCommitSequence), savedCommitSequence);
+            throw;
         }
-
-        WriteExtension(p);
-        CompleteCommit(p);
 
         _event?.Set();
     }
@@ -485,6 +525,14 @@ public sealed class BrokerSharedMemory : IDisposable
             dest[i] = bytes[i];
     }
 
+    // R13: 构造成功但未显式 Dispose 的对象由 finalizer 兜底释放原生句柄。
+    // 构造中途失败的对象不会进入 finalizer 队列（CLR 保证），由构造函数
+    // 的 catch 链负责清理；finalizer 仅访问原生句柄字段，不触碰托管对象。
+    ~BrokerSharedMemory()
+    {
+        ReleaseNativeResources();
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
@@ -494,6 +542,7 @@ public sealed class BrokerSharedMemory : IDisposable
         _event?.Dispose();
         _event = null;
         ReleaseNativeResources();
+        GC.SuppressFinalize(this);
     }
 
     private unsafe void InvalidateExtension()

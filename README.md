@@ -118,6 +118,12 @@ $msbuild = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\18\BuildTools\MSBui
 # MSIX 包位于 bin/x64/Debug/.../AppPackages/
 ```
 
+### 测试
+
+```powershell
+dotnet test SysMonCmdPal.Tests/SysMonCmdPal.Tests.csproj --configuration Debug
+```
+
 ### 发布
 
 ```powershell
@@ -190,7 +196,7 @@ sysmon-cmdpal/
 │   └── Models/
 │       └── SensorChainConfig.cs          # 精简版配置（版本号 + 旧 PrecisionMode 兼容字段）
 ├── SysMonCmdPal.Tests/                   # 自动化测试 (xUnit)
-├── SysMonBroker/                         # 可选提权代理 v2.3 (独立分发)
+├── SysMonBroker/                         # 可选提权代理 v2.4 (独立分发)
 │   ├── SysMonBroker.csproj               # .NET 10 WinExe, 自包含/单文件
 │   ├── Program.cs                        # LHM 采集 + SHM 写入
 │   ├── IPC/
