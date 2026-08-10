@@ -14,6 +14,7 @@ public static class BrokerDetector
 {
     private const string BrokerProcessName = "SysMonBroker";
     private const uint ProcessQueryLimitedInformation = 0x1000;
+    private const uint WaitTimeout = 0x00000102; // WAIT_TIMEOUT：进程仍在运行
 
     /// <summary>SysMonBroker 进程是否正在运行</summary>
     public static bool IsBrokerRunning()
@@ -46,7 +47,10 @@ public static class BrokerDetector
         {
             using (process)
             {
-                string? processPath = TryGetProcessPath(process.Id);
+                string? processPath = TryGetProcessPath(process.Id, out bool confirmedAlive);
+                if (!confirmedAlive)
+                    continue;
+
                 if (processPath != null && string.Equals(
                     Path.GetFullPath(processPath),
                     expectedPath,
@@ -60,13 +64,27 @@ public static class BrokerDetector
         return -1;
     }
 
-    private static string? TryGetProcessPath(int processId)
+    /// <summary>
+    /// 打开候选 PID 并确认其存活。进程刚退出的快照窗口内 PID 可能已被回收，
+    /// 此时读取到的路径不可信；<paramref name="confirmedAlive"/> 为 false 时调用方必须跳过。
+    /// </summary>
+    private static string? TryGetProcessPath(int processId, out bool confirmedAlive)
     {
         using SafeProcessHandle handle = OpenProcess(
             ProcessQueryLimitedInformation,
             bInheritHandle: false,
             processId);
         if (handle.IsInvalid)
+        {
+            confirmedAlive = false;
+            SensorLogger.ForceLog(
+                $"[BrokerDetector] OpenProcess 失败 PID={processId}，Win32 错误码={Marshal.GetLastWin32Error()}");
+            return null;
+        }
+
+        // WaitForSingleObject(hProcess, 0)：返回 WAIT_OBJECT_0 表示进程已退出。
+        confirmedAlive = WaitForSingleObject(handle, 0) == WaitTimeout;
+        if (!confirmedAlive)
             return null;
 
         var path = new StringBuilder(32768);
@@ -81,6 +99,9 @@ public static class BrokerDetector
         uint dwDesiredAccess,
         [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle,
         int dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(SafeProcessHandle hHandle, uint dwMilliseconds);
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]

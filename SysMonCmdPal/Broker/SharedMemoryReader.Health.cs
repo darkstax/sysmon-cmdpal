@@ -9,6 +9,10 @@ public sealed partial class SharedMemoryReader
 {
     private static readonly TimeSpan StallTimeout = BrokerSensorSnapshot.AvailabilityTimeout;
 
+    // stall 去抖：Broker 单周期最长可达 8s（硬件超时），StallTimeout 仅 5s，
+    // 连续 StallDebounceThreshold 次检测到 stall 才 MarkUnavailable/Disconnect。
+    private const int StallDebounceThreshold = 2;
+
     private int? _lastCounter;
     private long _lastBrokerTimestampTicks;
     private ulong _lastInstanceId;
@@ -18,6 +22,11 @@ public sealed partial class SharedMemoryReader
     private string _lastObservedMapName = "";
     private bool _awaitingCounterAdvance;
     private int _restartBaselineCounter;
+
+    // 仅由 reader 线程访问：连续 stall 观察次数（恢复后清零）。
+    private int _consecutiveStalls;
+    // 上次计 restartDelta 时的 instanceId（无 extension 时为 0），用于按实例去重。
+    private ulong? _lastRestartCountedInstanceId;
 
     private static readonly object s_diagnosticsLock = new();
     private static SharedMemoryReaderDiagnostics s_diagnostics = new();
@@ -35,9 +44,11 @@ public sealed partial class SharedMemoryReader
         int restartDelta = 0;
         bool skipPreviousCounterComparison = false;
 
-        // A structurally committed SMX1 initialization is not sensor data.
-        // Require a later counter advance from the same instance before publish.
-        if (!_hasObservedSnapshot && (snapshot.HasExtension || counter == 0))
+        // 首连一律要求 counter 前进验证（双快照）后再发布：
+        // 旧版（无 extension）Broker 初始化窗口内 counter≠0 的历史假设不可靠，
+        // 直接发布可能泄漏初始化中的空数据；带 extension 的提交帧也需要
+        // 等后续 counter 前进确认该帧已稳定提交。
+        if (!_hasObservedSnapshot)
         {
             ObserveBaseline(snapshot);
             _awaitingCounterAdvance = !snapshot.HasExtension;
@@ -74,7 +85,14 @@ public sealed partial class SharedMemoryReader
                 counterMovedBackwards ||
                 sameCounterWithNewTimestamp)
             {
-                restartDelta = 1;
+                // 按 instanceId 去重：仅当 instanceId 与上次计数时不同才 +1，
+                // 避免一次重启被计两次（如 extensionRemoved 后再 instanceChanged）。
+                if (_lastRestartCountedInstanceId != snapshot.InstanceId)
+                {
+                    restartDelta = 1;
+                    _lastRestartCountedInstanceId = snapshot.InstanceId;
+                }
+
                 BrokerPushReceiver.Instance.MarkUnavailable();
                 _lastCounterAdvanceTimestamp = 0;
 
@@ -104,6 +122,7 @@ public sealed partial class SharedMemoryReader
             if (counter == _restartBaselineCounter)
             {
                 bool stalled = IsStalled();
+                bool stallConfirmed = RecordStallObservation(stalled);
                 ReportWaitingForCommit(
                     snapshot,
                     brokerTimestampUtc,
@@ -113,8 +132,8 @@ public sealed partial class SharedMemoryReader
                         ? $"Broker commit counter has not advanced for {StallTimeout.TotalSeconds:F0} seconds"
                         : "Broker is initialized; waiting for the first data commit",
                     stalled: stalled,
-                    connected: !stalled);
-                if (stalled)
+                    connected: !stallConfirmed);
+                if (stallConfirmed)
                     Disconnect();
                 return;
             }
@@ -125,10 +144,14 @@ public sealed partial class SharedMemoryReader
 
         if (snapshot.HasExtension && IsBrokerPublishStalled(snapshot.MonotonicPublishMs))
         {
+            // 去抖：连续 StallDebounceThreshold 次 publish 超时才 MarkUnavailable，
+            // 容忍 Broker 单周期可达 8s（StallTimeout 仅 5s）的硬件超时。
+            bool stallConfirmed = RecordStallObservation(true);
             if (_lastCounter != counter || _lastInstanceId != snapshot.InstanceId)
                 ObserveBaseline(snapshot);
 
-            BrokerPushReceiver.Instance.MarkUnavailable();
+            if (stallConfirmed)
+                BrokerPushReceiver.Instance.MarkUnavailable();
             UpdateDiagnostics(
                 connected: true,
                 protocolValid: true,
@@ -150,15 +173,16 @@ public sealed partial class SharedMemoryReader
         if (!skipPreviousCounterComparison && _lastCounter == counter)
         {
             bool stalled = IsStalled();
+            bool stallConfirmed = RecordStallObservation(stalled);
             string mapName = _connectedMapName;
-            if (stalled && !snapshot.HasExtension)
+            if (stallConfirmed && !snapshot.HasExtension)
             {
                 BrokerPushReceiver.Instance.MarkUnavailable();
                 Disconnect();
             }
 
             UpdateDiagnostics(
-                connected: snapshot.HasExtension || !stalled,
+                connected: snapshot.HasExtension || !stallConfirmed,
                 protocolValid: true,
                 stalled: stalled,
                 mapName: mapName,
@@ -216,6 +240,8 @@ public sealed partial class SharedMemoryReader
         _hasObservedSnapshot = true;
         _hasPublishedSnapshot = true;
         _lastObservedMapName = _connectedMapName;
+        // 成功发布即恢复，stall 去抖计数清零。
+        _consecutiveStalls = 0;
 
         UpdateDiagnostics(
             connected: true,
@@ -276,6 +302,22 @@ public sealed partial class SharedMemoryReader
 
     private bool IsStalled() => _lastCounterAdvanceTimestamp > 0 &&
         Stopwatch.GetElapsedTime(_lastCounterAdvanceTimestamp) >= StallTimeout;
+
+    /// <summary>
+    /// 记录一次 stall 观察：连续 StallDebounceThreshold 次才确认（返回 true）；
+    /// 观察到非 stall（恢复）时计数清零。仅由 reader 线程调用。
+    /// </summary>
+    private bool RecordStallObservation(bool stalled)
+    {
+        if (!stalled)
+        {
+            _consecutiveStalls = 0;
+            return false;
+        }
+
+        _consecutiveStalls++;
+        return _consecutiveStalls >= StallDebounceThreshold;
+    }
 
     private static bool IsBrokerPublishStalled(long monotonicPublishMs)
     {

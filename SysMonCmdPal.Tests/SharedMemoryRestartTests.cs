@@ -91,18 +91,32 @@ public class SharedMemoryRestartTests
     {
         using var harness = new SharedMemoryReaderHarness();
         long firstTimestamp = DateTime.UtcNow.AddSeconds(-2).Ticks;
-        long restartTimestamp = DateTime.UtcNow.AddSeconds(-1).Ticks;
+        long commitTimestamp = DateTime.UtcNow.AddSeconds(-1).Ticks;
+        long restartTimestamp = DateTime.UtcNow.Ticks;
+
+        // 首连双快照：counter 4（基线）→ 5（提交帧）发布 60。
         harness.ProcessV2(
             BrokerTestData.V2Buffer(
-                5,
+                4,
                 cpuTemperature: 60,
                 timestampTicks: firstTimestamp,
                 extensionMagic: 0,
                 instanceId: 0,
                 monotonicPublishMs: 0),
-            5,
+            4,
             firstTimestamp);
+        harness.ProcessV2(
+            BrokerTestData.V2Buffer(
+                5,
+                cpuTemperature: 60,
+                timestampTicks: commitTimestamp,
+                extensionMagic: 0,
+                instanceId: 0,
+                monotonicPublishMs: 0),
+            5,
+            commitTimestamp);
 
+        // 同 counter 新 timestamp → 重启信号，等待下一次 counter 前进。
         harness.ProcessV2(
             BrokerTestData.V2Buffer(
                 5,
@@ -119,7 +133,7 @@ public class SharedMemoryRestartTests
         Assert.Equal(1, SharedMemoryReader.Diagnostics.RestartCount);
         Assert.Contains("waiting for the next committed update", SharedMemoryReader.Diagnostics.LastError);
 
-        long committedTimestamp = DateTime.UtcNow.Ticks;
+        long committedTimestamp = DateTime.UtcNow.AddTicks(1).Ticks;
         harness.ProcessV2(
             BrokerTestData.V2Buffer(
                 6,

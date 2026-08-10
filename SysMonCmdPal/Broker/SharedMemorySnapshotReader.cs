@@ -149,9 +149,13 @@ internal sealed class SharedMemorySnapshotReader
                 return StableReadStatus.InvalidExtension;
             }
 
+            // 拷贝缓冲区：StableSnapshot 持有独立数组，避免被下次 TryRead
+            // 对共享 _buffer 的原地覆盖污染。
+            byte[] data = new byte[layout.ReadLength];
+            Buffer.BlockCopy(_buffer, 0, data, 0, layout.ReadLength);
             snapshot = new StableSnapshot(
                 layout,
-                _buffer,
+                data,
                 counterBefore,
                 brokerTimestampTicks,
                 hasExtension,

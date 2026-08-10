@@ -16,11 +16,16 @@ namespace SysMonCmdPal.Broker;
 public sealed partial class SharedMemoryReader : IDisposable
 {
     private const int PollIntervalMilliseconds = 1000;
+    private const int MaxBackoffMilliseconds = 30_000;
+    private const int SleepGranularityMilliseconds = 250;
 
     private readonly Thread _readerThread;
     private readonly SharedMemorySnapshotReader _snapshotReader = new();
     private volatile bool _running;
     private bool _disposed;
+
+    // 仅由 reader 线程访问：连续连接失败次数（退避状态）。
+    private int _consecutiveFailures;
 
     private MemoryMappedFile? _mmf;
     private MemoryMappedViewAccessor? _accessor;
@@ -40,12 +45,34 @@ public sealed partial class SharedMemoryReader : IDisposable
 
     private void ReaderLoop()
     {
-        while (_running)
+        try
         {
-            try
+            while (_running)
             {
-                if (!EnsureConnected())
+                int sleepMs = PollIntervalMilliseconds;
+                try
                 {
+                    if (!EnsureConnected())
+                    {
+                        sleepMs = RecordConnectionFailure();
+                        BrokerPushReceiver.Instance.MarkUnavailable();
+                        UpdateDiagnostics(
+                            connected: false,
+                            protocolValid: false,
+                            stalled: false,
+                            mapName: "",
+                            error: "");
+                    }
+                    else
+                    {
+                        ResetConnectionFailures();
+                        ReadOnce();
+                    }
+                }
+                catch (FileNotFoundException)
+                {
+                    Disconnect();
+                    sleepMs = RecordConnectionFailure();
                     BrokerPushReceiver.Instance.MarkUnavailable();
                     UpdateDiagnostics(
                         connected: false,
@@ -54,38 +81,49 @@ public sealed partial class SharedMemoryReader : IDisposable
                         mapName: "",
                         error: "");
                 }
-                else
+                catch (Exception ex)
                 {
-                    ReadOnce();
+                    string mapName = _connectedMapName;
+                    Disconnect();
+                    sleepMs = RecordConnectionFailure();
+                    BrokerPushReceiver.Instance.MarkUnavailable();
+                    UpdateDiagnostics(
+                        connected: false,
+                        protocolValid: false,
+                        stalled: false,
+                        mapName: mapName,
+                        error: $"{ex.GetType().Name}: {ex.Message}");
+                }
+
+                // 分段睡眠：退避可达 30s，分段让线程在停止后快速退出并清理。
+                int remaining = sleepMs;
+                while (_running && remaining > 0)
+                {
+                    Thread.Sleep(Math.Min(remaining, SleepGranularityMilliseconds));
+                    remaining -= SleepGranularityMilliseconds;
                 }
             }
-            catch (FileNotFoundException)
-            {
-                Disconnect();
-                BrokerPushReceiver.Instance.MarkUnavailable();
-                UpdateDiagnostics(
-                    connected: false,
-                    protocolValid: false,
-                    stalled: false,
-                    mapName: "",
-                    error: "");
-            }
-            catch (Exception ex)
-            {
-                string mapName = _connectedMapName;
-                Disconnect();
-                BrokerPushReceiver.Instance.MarkUnavailable();
-                UpdateDiagnostics(
-                    connected: false,
-                    protocolValid: false,
-                    stalled: false,
-                    mapName: mapName,
-                    error: $"{ex.GetType().Name}: {ex.Message}");
-            }
-
-            Thread.Sleep(PollIntervalMilliseconds);
+        }
+        finally
+        {
+            // 线程退出路径统一清理：无论因停止请求还是异常离开循环，
+            // 都释放句柄，关闭 Dispose Join 超时后的句柄泄漏窗口。
+            Disconnect();
+            BrokerPushReceiver.Instance.MarkUnavailable();
+            UpdateDiagnostics(connected: false, stalled: false, mapName: "");
         }
     }
+
+    /// <summary>记录一次连续连接失败，返回下次重试的指数退避延迟（1s→2s→4s→…上限 30s）。</summary>
+    private int RecordConnectionFailure()
+    {
+        _consecutiveFailures++;
+        int delay = PollIntervalMilliseconds << Math.Min(_consecutiveFailures - 1, 5);
+        return Math.Min(delay, MaxBackoffMilliseconds);
+    }
+
+    /// <summary>连接成功即复位退避计数。</summary>
+    private void ResetConnectionFailures() => _consecutiveFailures = 0;
 
     private bool EnsureConnected()
     {
@@ -155,7 +193,10 @@ public sealed partial class SharedMemoryReader : IDisposable
         }
 
         bool stalled = IsStalled();
-        if (status != StableReadStatus.Unstable || stalled)
+        // stall 去抖：连续 StallDebounceThreshold 次检测到 stall 才断连，
+        // 容忍 Broker 单周期最长可达 8s（StallTimeout 仅 5s）的硬件超时。
+        bool stallConfirmed = RecordStallObservation(stalled);
+        if (status != StableReadStatus.Unstable || stallConfirmed)
             BrokerPushReceiver.Instance.MarkUnavailable();
 
         UpdateDiagnostics(
@@ -167,7 +208,7 @@ public sealed partial class SharedMemoryReader : IDisposable
             unstableReadDelta: retryCount,
             error: error);
 
-        if (stalled)
+        if (stallConfirmed)
             Disconnect();
     }
 
@@ -188,17 +229,28 @@ public sealed partial class SharedMemoryReader : IDisposable
 
         _disposed = true;
         _running = false;
+
+        bool joined = false;
         try
         {
-            _readerThread.Join(3000);
+            joined = _readerThread.Join(3000);
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[ShmReader] Join failed: {ex.Message}");
         }
 
-        Disconnect();
-        BrokerPushReceiver.Instance.MarkUnavailable();
-        UpdateDiagnostics(connected: false, stalled: false, mapName: "");
+        if (joined)
+        {
+            // 线程已退出并在退出路径完成清理；这里仅做幂等收尾，
+            // 此时不存在与线程的并发，Disconnect 是安全的。
+            Disconnect();
+            BrokerPushReceiver.Instance.MarkUnavailable();
+            UpdateDiagnostics(connected: false, stalled: false, mapName: "");
+        }
+        // Join 超时：线程仍存活，绝不能在此处 Disconnect——否则线程可能在
+        // Disconnect 之后重新 OpenExisting 并赋值 _mmf/_accessor，无人释放
+        // 造成句柄泄漏。改为由线程在下一轮退出前（ReaderLoop finally）统一清理。
+        // 重复 Dispose 由 _disposed 标志保证幂等。
     }
 }

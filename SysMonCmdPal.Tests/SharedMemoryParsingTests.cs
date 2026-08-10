@@ -53,14 +53,24 @@ public class SharedMemoryParsingTests
     {
         using var harness = new SharedMemoryReaderHarness();
         long timestamp = DateTime.UtcNow.Ticks;
-        byte[] buffer = BrokerTestData.V1Buffer(
+
+        // 首连双快照验证：无 extension 首帧 counter=4 仅建立基线，
+        // counter 前进到 5（提交帧）后才发布。
+        byte[] baseline = BrokerTestData.V1Buffer(
             counter: 4,
             cpuTemperature: 59,
             source: "LegacyBroker",
             gpus: [new TestGpu("Legacy GPU", 66, 41, 2048, 8192)],
             timestampTicks: timestamp);
+        byte[] committed = BrokerTestData.V1Buffer(
+            counter: 5,
+            cpuTemperature: 59,
+            source: "LegacyBroker",
+            gpus: [new TestGpu("Legacy GPU", 66, 41, 2048, 8192)],
+            timestampTicks: timestamp);
 
-        harness.ProcessV1(buffer, counter: 4, timestamp);
+        harness.ProcessV1(baseline, counter: 4, timestamp);
+        harness.ProcessV1(committed, counter: 5, timestamp);
 
         BrokerSensorSnapshot snapshot = harness.Receiver.Snapshot;
         Assert.True(harness.Receiver.IsBrokerAvailable);
@@ -76,15 +86,26 @@ public class SharedMemoryParsingTests
     {
         using var harness = new SharedMemoryReaderHarness();
         long timestamp = DateTime.UtcNow.Ticks;
-        byte[] buffer = BrokerTestData.V2Buffer(
+
+        // 首连双快照验证：无 extension 首帧 counter=3 仅建立基线，
+        // counter 前进到 4（提交帧）后才发布。
+        byte[] baseline = BrokerTestData.V2Buffer(
             counter: 3,
             cpuTemperature: 62,
             timestampTicks: timestamp,
             extensionMagic: 0,
             instanceId: 0,
             monotonicPublishMs: 0);
+        byte[] committed = BrokerTestData.V2Buffer(
+            counter: 4,
+            cpuTemperature: 62,
+            timestampTicks: timestamp,
+            extensionMagic: 0,
+            instanceId: 0,
+            monotonicPublishMs: 0);
 
-        harness.ProcessV2(buffer, 3, timestamp);
+        harness.ProcessV2(baseline, 3, timestamp);
+        harness.ProcessV2(committed, 4, timestamp);
 
         Assert.True(harness.Receiver.IsBrokerAvailable);
         Assert.Equal(62, harness.Receiver.Snapshot.CpuTemperature);
