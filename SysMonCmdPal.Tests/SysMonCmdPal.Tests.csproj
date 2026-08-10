@@ -8,6 +8,8 @@
     <LangVersion>preview</LangVersion>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <!-- BrokerSharedMemoryTests 用 fixed 缓冲区反射调用 private unsafe 方法 -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
@@ -29,6 +31,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SysMonCmdPal\SysMonCmdPal.csproj" />
+    <!-- 写端协议测试（BrokerSharedMemoryTests）与常量守护测试（ShmLayoutConsistencyTests）
+         需要反射读取 SysMonBroker 程序集的常量与私有成员 -->
+    <ProjectReference Include="..\SysMonBroker\SysMonBroker.csproj" />
   </ItemGroup>
 
 </Project>

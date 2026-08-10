@@ -163,4 +163,21 @@ public class SharedMemoryProtocolTests
         Assert.Equal("InvalidExtension", incomplete.Status);
         Assert.Contains("Invalid shared memory extension payload", incomplete.Error);
     }
+
+    [Theory]
+    [InlineData(4097)]
+    [InlineData(8192)]
+    [InlineData(16383)]
+    public void StableRead_RejectsInBetweenViewSizes(int viewSize)
+    {
+        // R23: 4096 < viewSize < 16384 的中间尺寸既不是 v1 也不是 v2 map，
+        // 必须拒绝（不可按 v1 或 v2 布局解析）。
+        using var harness = new SharedMemoryReaderHarness();
+        byte[] buffer = BrokerTestData.V2Buffer(counter: 1);
+
+        StableReadResult result = harness.ReadStable(buffer, viewSize);
+
+        Assert.Equal("ViewTooSmall", result.Status);
+        Assert.Contains("unsupported size", result.Error);
+    }
 }
