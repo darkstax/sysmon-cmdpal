@@ -10,6 +10,7 @@
 //       Removed DevMode verifier + hash registration.
 
 using System.Threading;
+using System.Diagnostics;
 using SysMonBroker.IPC;
 using SysMonBroker.Logging;
 using SysMonBroker.Sensors;
@@ -19,6 +20,12 @@ namespace SysMonBroker;
 internal static class Program
 {
     private const int WriterConflictExitCode = 2;
+    private const int WatchdogExitCode = 3;
+    private const int MaxConsecutiveCycleErrors = 30;
+    private static readonly TimeSpan CycleTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(120);
+    private static long s_lastCycleTimestamp;
+    private static long s_startTimestamp;
 
     static int Main(string[] args)
     {
@@ -26,13 +33,24 @@ internal static class Program
         {
             var ex = e.ExceptionObject as Exception;
             Log($"FATAL: {ex?.Message}\nFATAL: {ex?.StackTrace}");
+            // 进程即将终止：显式落盘，确保 FATAL 行不丢（R02）
+            BrokerLogger.Flush();
             Thread.Sleep(500);
         };
 
         Log($"=== SysMonBroker v2.4 starting (standalone SHM mode) ===");
 
+        s_startTimestamp = Stopwatch.GetTimestamp();
+
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+
+        var watchdog = new Thread(() => WatchdogLoop(cts.Token))
+        {
+            IsBackground = true,
+            Name = "BrokerWatchdog",
+        };
+        watchdog.Start();
 
         SensorCollector? collector = null;
         BrokerSharedMemory? shm = null;
@@ -49,6 +67,8 @@ internal static class Program
             Log($"SensorCollector ready. PawnIO: {(collector.PawnIoInstalled ? "installed" : "not installed — user-mode sensors only")}");
 
             int cycle = 0;
+            int lastGpuCount = -1;
+            int consecutiveErrors = 0;
 
             while (!cts.Token.IsCancellationRequested)
             {
@@ -58,6 +78,14 @@ internal static class Program
                     var (cpuTemp, cpuSource, gpus, sensors) = collector.ReadAll();
 
                     shm.Write(cpuTemp, cpuSource, gpus, sensors);
+                    Interlocked.Exchange(ref s_lastCycleTimestamp, Stopwatch.GetTimestamp());
+
+                    // 周期成功：清零连续错误计数（R06）
+                    consecutiveErrors = 0;
+
+                    if (lastGpuCount >= 0 && gpus.Count != lastGpuCount)
+                        Log($"cycle={cycle} GPU count changed: {lastGpuCount} -> {gpus.Count}");
+                    lastGpuCount = gpus.Count;
 
                     if (cycle <= 3 || cycle % 30 == 1)
                     {
@@ -81,7 +109,15 @@ internal static class Program
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    Log($"Cycle error: {ex.Message}");
+                    // 连续错误降频记录 + 持续失败主动退出走计划任务重启（R06）
+                    consecutiveErrors++;
+                    if (consecutiveErrors == 1 || consecutiveErrors % 10 == 0)
+                        Log($"Cycle error ({consecutiveErrors} consecutive): {ex.Message}");
+                    if (consecutiveErrors >= MaxConsecutiveCycleErrors)
+                    {
+                        Log($"FATAL: {consecutiveErrors} consecutive cycle errors; exiting for task restart");
+                        return 1;
+                    }
                 }
 
                 Thread.Sleep(2000);
@@ -89,8 +125,11 @@ internal static class Program
         }
         catch (BrokerAlreadyRunningException ex)
         {
-            Log($"FATAL: {ex.Message}");
-            return WriterConflictExitCode;
+            // 已有实例持有写者租约属正常状态（R04）。计划任务无法按退出码区分
+            // 重启策略（RestartCount 对所有非零退出码一视同仁），返回 0 可避免
+            // 无意义的重启尝试并节省 RestartCount 配额。
+            Log($"{ex.Message} (another instance is serving; exiting normally)");
+            return 0;
         }
         catch (BrokerWriterConflictException ex)
         {
@@ -105,13 +144,44 @@ internal static class Program
         finally
         {
             Log("Shutting down...");
-            shm?.Dispose();
-            collector?.Dispose();
+            // 每个 Dispose 独立容错：任一失败不得中断 stopped 日志 / Flush / 退出码语义（R01）
+            try { shm?.Dispose(); }
+            catch (Exception ex) { Log($"WARN: SharedMemory dispose failed: {ex.Message}"); }
+            try { collector?.Dispose(); }
+            catch (Exception ex) { Log($"WARN: SensorCollector dispose failed: {ex.Message}"); }
             Log("=== SysMonBroker stopped ===");
             BrokerLogger.Flush();
         }
 
         return 0;
+    }
+
+    private static void WatchdogLoop(CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            Thread.Sleep(5000);
+            long lastCycle = Interlocked.Read(ref s_lastCycleTimestamp);
+            long start = Interlocked.Read(ref s_startTimestamp);
+
+            if (lastCycle == 0)
+            {
+                if (start > 0 && Stopwatch.GetElapsedTime(start) > StartupTimeout)
+                {
+                    Log($"FATAL: watchdog detected startup hang (>{(int)StartupTimeout.TotalSeconds}s); exiting for task restart");
+                    BrokerLogger.Flush(); // R03: Exit 前显式落盘 FATAL 行
+                    Environment.Exit(WatchdogExitCode);
+                }
+                continue;
+            }
+
+            if (Stopwatch.GetElapsedTime(lastCycle) > CycleTimeout)
+            {
+                Log($"FATAL: watchdog detected stalled sensor cycle (>{(int)CycleTimeout.TotalSeconds}s); exiting for task restart");
+                BrokerLogger.Flush(); // R03: Exit 前显式落盘 FATAL 行
+                Environment.Exit(WatchdogExitCode);
+            }
+        }
     }
 
     private static string ShmTagName(int tag) => tag switch

@@ -52,6 +52,25 @@ function Get-CurrentUserId {
     catch { return "$env:USERDOMAIN\$env:USERNAME" }
 }
 
+# 等待指定进程真正退出（最多 $TimeoutSeconds 秒）。Stop-Process -Force 返回后
+# 进程句柄虽已失效，但 exe 文件可能短暂仍被占用，立即 Remove-Item/Copy-Item
+# 会因 Sharing Violation 失败（R28）。返回 $true 表示已退出。
+function Wait-ProcessExited {
+    param(
+        [string]$Name,
+        [int]$TimeoutSeconds = 15
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Process -Name $Name -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+    }
+    if (Get-Process -Name $Name -ErrorAction SilentlyContinue) {
+        Log "WARNING: $Name 进程 $TimeoutSeconds 秒内未完全退出，继续操作（文件可能仍被占用）"
+        return $false
+    }
+    return $true
+}
+
 function Invoke-ElevatedBroker {
     param(
         [ValidateSet("Install", "Uninstall")]
@@ -307,6 +326,7 @@ function Deploy-Broker {
 
     Get-Process SysMonBroker -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
+    Wait-ProcessExited -Name SysMonBroker | Out-Null
 
     $oldTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($oldTask) {
@@ -334,6 +354,16 @@ function Deploy-Broker {
     $taskAction    = New-ScheduledTaskAction -Execute $BrokerExe -WorkingDirectory $BrokerTargetDir
     $taskTrigger   = New-ScheduledTaskTrigger -AtLogOn
     $taskPrincipal = New-ScheduledTaskPrincipal -UserId $principalUser -RunLevel Highest -LogonType Interactive
+
+    # Broker 退出码语义（供诊断参考）：
+    #   0 — 正常退出；含“已有实例在服务”的第二个实例（AlreadyRunning），
+    #       此时第一个实例仍在正常供数，第二个实例退出不是故障。
+    #   1 — 致命错误（初始化失败 / 连续 30 次周期错误），触发计划任务重启。
+    #   2 — 共享内存写入者冲突（BrokerWriterConflict，异常），触发重启。
+    #   3 — 看门狗检测到启动挂起或周期停滞，触发重启。
+    # 注意：Windows 计划任务无法按退出码区分重启策略（RestartCount 对所有
+    # 非零退出码一视同仁），因此“已有实例”这种正常状态必须返回 0，否则
+    # 每次启动都会触发无意义的重启并浪费 RestartCount=3 的配额。
     $taskSettings  = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) `
@@ -382,6 +412,7 @@ function Uninstall-Broker {
 
     Get-Process SysMonBroker -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
+    Wait-ProcessExited -Name SysMonBroker | Out-Null
 
     $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($task) {
