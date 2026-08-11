@@ -150,7 +150,7 @@ No test account or external hardware is required for basic certification.
 - Asset: `SysMonBroker-win-x64.exe` (~100 MB), URL: https://github.com/darkstax/sysmon-cmdpal/releases/tag/v2.4.0.0
 - End-to-end validation passed: asset name match, size range (64KB-256MB), download URL allow-list, local SHA256 == GitHub `digest` (sha256:b72d1cb6ddde90292dd27cee57bc1fad9ead85969eb5c322f487d079caaa17ed)
 - Note: GitHub populates asset `digest` asynchronously (~7 min after upload).
-- Signing: not signed (SmartScreen warning expected on first run); revisit with Azure Trusted Signing later.
+- Signing: **decision — not signing** (accepted SmartScreen warning; standard for open-source projects). No code-signing certificate purchase planned for now.
 
 ## Submission Progress Log (2026-08-11)
 
@@ -158,7 +158,8 @@ No test account or external hardware is required for basic certification.
   - Gotcha: selecting "No" for the privacy question hides the URL input and is silently reverted on save — runFullTrust apps must answer Yes + provide a policy URL.
 - Submission options: manual publish selected; runFullTrust justification filled (605 chars). Section still shows "Incomplete" — restricted-capability approval is processed with certification submission.
 - Additional Testing Info: certification notes saved.
-- Remaining before submit: clean 16:9 screenshots, final package/Broker review, user approval.
+- Screenshots: 4 new 1920x1080 16:9 PNGs uploaded to the English (en-US) listing (replacing the old validation screenshots); listing saved.
+- Remaining before submit: final package/Broker review and user approval (Submission options stays "Incomplete" until restricted-capability approval is processed with certification).
 
 ## Submission Options
 
