@@ -8,7 +8,7 @@ Draft submission: `1152921505701316701`
 
 - Product name: `SysPulse for Command Palette`
 - Current repository version: `1.5.0.0`
-- Current Store draft package: `1.3.0.0` (replace before certification)
+- Current Store draft package: `1.5.0.0` (uploaded 2026-08-11, validated in draft)
 - Architecture: x64
 - Category: Utilities & tools
 - Pricing: Free
@@ -143,6 +143,22 @@ PE architecture, and then requests one administrator approval. The main
 extension remains functional when the Broker is absent.
 
 No test account or external hardware is required for basic certification.
+
+## Broker Release (2026-08-11)
+
+- GitHub Release: `v2.4.0.0` (SysMonBroker 2.4.0.0, .NET 10 single-file x64)
+- Asset: `SysMonBroker-win-x64.exe` (~100 MB), URL: https://github.com/darkstax/sysmon-cmdpal/releases/tag/v2.4.0.0
+- End-to-end validation passed: asset name match, size range (64KB-256MB), download URL allow-list, local SHA256 == GitHub `digest` (sha256:b72d1cb6ddde90292dd27cee57bc1fad9ead85969eb5c322f487d079caaa17ed)
+- Note: GitHub populates asset `digest` asynchronously (~7 min after upload).
+- Signing: not signed (SmartScreen warning expected on first run); revisit with Azure Trusted Signing later.
+
+## Submission Progress Log (2026-08-11)
+
+- Properties: Complete (category Utilities + tools; privacy Yes + URL; support links).
+  - Gotcha: selecting "No" for the privacy question hides the URL input and is silently reverted on save — runFullTrust apps must answer Yes + provide a policy URL.
+- Submission options: manual publish selected; runFullTrust justification filled (605 chars). Section still shows "Incomplete" — restricted-capability approval is processed with certification submission.
+- Additional Testing Info: certification notes saved.
+- Remaining before submit: clean 16:9 screenshots, final package/Broker review, user approval.
 
 ## Submission Options
 
