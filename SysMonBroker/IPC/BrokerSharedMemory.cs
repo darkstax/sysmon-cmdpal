@@ -321,7 +321,10 @@ public sealed class BrokerSharedMemory : IDisposable
         WriteExtension(p);
         CompleteCommit(p);
 
-        _event?.Set();
+        // 事件通知是尽力而为（读端仅轮询、不消费）：Set 失败不得向外抛，否则
+        // 调用方 lastCycle 心跳不更新 → 看门狗误判停滞（审计 B-F2）。
+        try { _event?.Set(); }
+        catch { }
     }
 
     private void ApplySecurityDescriptor(bool throwOnFailure)
@@ -429,7 +432,10 @@ public sealed class BrokerSharedMemory : IDisposable
             throw;
         }
 
-        _event?.Set();
+        // 同 InitializeHeader：Set 是 best-effort，异常不得中断 Write 成功返回
+        // （否则 Program.cs 心跳不更新 → 看门狗误杀，审计 B-F2）。
+        try { _event?.Set(); }
+        catch { }
     }
 
     private unsafe void EnsureWriterOwnership(byte* p)

@@ -72,7 +72,17 @@ public static class BrokerLogger
             }
             catch { }
 
-            File.AppendAllText(LogPath, _buffer.ToString());
+            // 用 FileShare.ReadWrite|Delete 代替 File.AppendAllText 的默认 FileShare.Read：
+            // 升级/双开窗口新旧 Broker 实例可能并存写同一日志，默认共享模式会让第二个
+            // 实例 Open 直接失败（IO 异常被吞 → 整个 buffer 丢失，审计 A-F8）。宽容共享
+            // 下写入允许并发，MoveTo 轮转也不会被已打开的句柄阻止。
+            using (var fs = new FileStream(LogPath,
+                FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+            using (var sw = new StreamWriter(fs, System.Text.Encoding.UTF8))
+            {
+                sw.Write(_buffer.ToString());
+                sw.Flush();
+            }
             _buffer.Clear();
         }
         catch (Exception ex)

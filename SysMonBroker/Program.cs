@@ -22,7 +22,11 @@ internal static class Program
     private const int WriterConflictExitCode = 2;
     private const int WatchdogExitCode = 3;
     private const int MaxConsecutiveCycleErrors = 30;
-    private static readonly TimeSpan CycleTimeout = TimeSpan.FromSeconds(15);
+    // 看门狗阈值层次（审计 A-F3/E-F6）：LHM 单硬件更新超时 HardwareUpdateTimeout=8s，
+    // 超时即 break 跳过剩余硬件 → 单轮最坏 ≈ 8s（超时）+ 正常硬件更新（慢主板可达 5s）+ 2s 周期 ≈ 15s。
+    // CycleTimeout=20s 为其留出余量，避免慢系统+单 wedged 硬件组合被误杀；
+    // 真实停滞（进程 wedged >20s）与启动挂起（>120s）仍由看门狗兜底重启。
+    private static readonly TimeSpan CycleTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(120);
     private static long s_lastCycleTimestamp;
     private static long s_startTimestamp;
@@ -160,25 +164,40 @@ internal static class Program
     {
         while (!token.IsCancellationRequested)
         {
-            Thread.Sleep(5000);
-            long lastCycle = Interlocked.Read(ref s_lastCycleTimestamp);
-            long start = Interlocked.Read(ref s_startTimestamp);
-
-            if (lastCycle == 0)
+            try
             {
-                if (start > 0 && Stopwatch.GetElapsedTime(start) > StartupTimeout)
+                Thread.Sleep(5000);
+                long lastCycle = Interlocked.Read(ref s_lastCycleTimestamp);
+                long start = Interlocked.Read(ref s_startTimestamp);
+
+                if (lastCycle == 0)
                 {
-                    Log($"FATAL: watchdog detected startup hang (>{(int)StartupTimeout.TotalSeconds}s); exiting for task restart");
+                    if (start > 0 && Stopwatch.GetElapsedTime(start) > StartupTimeout)
+                    {
+                        Log($"FATAL: watchdog detected startup hang (>{(int)StartupTimeout.TotalSeconds}s); exiting for task restart");
+                        BrokerLogger.Flush(); // R03: Exit 前显式落盘 FATAL 行
+                        Environment.Exit(WatchdogExitCode);
+                    }
+                    continue;
+                }
+
+                if (Stopwatch.GetElapsedTime(lastCycle) > CycleTimeout)
+                {
+                    Log($"FATAL: watchdog detected stalled sensor cycle (>{(int)CycleTimeout.TotalSeconds}s); exiting for task restart");
                     BrokerLogger.Flush(); // R03: Exit 前显式落盘 FATAL 行
                     Environment.Exit(WatchdogExitCode);
                 }
-                continue;
             }
-
-            if (Stopwatch.GetElapsedTime(lastCycle) > CycleTimeout)
+            catch (Exception ex)
             {
-                Log($"FATAL: watchdog detected stalled sensor cycle (>{(int)CycleTimeout.TotalSeconds}s); exiting for task restart");
-                BrokerLogger.Flush(); // R03: Exit 前显式落盘 FATAL 行
+                // A-F12: 看门狗自身异常不得静默死亡（否则防护失效且无日志）；
+                // 记录后按停滞处理退出，交给计划任务重启。
+                try
+                {
+                    Log($"FATAL: watchdog loop failure: {ex.Message}");
+                    BrokerLogger.Flush();
+                }
+                catch { }
                 Environment.Exit(WatchdogExitCode);
             }
         }
