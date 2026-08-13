@@ -1,51 +1,81 @@
-# Technical Constraints
+# sysmon-cmdpal — 项目技术文档
 
-## Exploration
+> PowerToys Command Palette 系统监控扩展:在命令面板中实时展示 CPU/内存/GPU/温度等传感器数据;
+> 可选提升权限的 SysMonBroker 进程采集硬件数据,经共享内存单向送达。
 
-- Use `code-review-graph` first for architecture, impact, review, callers/callees, and tests.
-- Fall back to `rg` or direct file reads only for exact text, generated assets, resources, or files not covered by the graph.
-- Check `git status --short --branch` before edits; this repository often has active work in progress.
+## 1. 技术栈
 
-## Toolchain
+| 类别 | 内容 |
+|------|------|
+| 语言/运行时 | C#(.NET 10 preview 特性),目标框架 `net10.0-windows10.0.26100.0` |
+| UI 框架 | Windows App SDK 1.6,PowerToys Command Palette 扩展(MSIX + runFullTrust) |
+| 通信 | Shared Memory v2(单向)+ 事件通知 |
+| 测试 | xUnit(300 用例),`SysMonCmdPal.Tests` 项目 |
+| 构建 | Visual Studio / MSBuild(Build Tools 2026),非 Linux `dotnet build` |
 
-- Target framework: `net10.0-windows10.0.26100.0`.
-- Language/runtime: C# preview features on .NET 10.
-- Main extension builds with Visual Studio/MSBuild, not Linux `dotnet build`, because MSIX/AppX packaging depends on Windows tooling.
-- Required Windows stack: Windows 11, PowerToys installed, Developer Mode, Windows App SDK 1.6, VS Build Tools 2026, .NET SDK 10.0.300+.
-- From WSL, convert repository paths with `wslpath -w` and invoke `pwsh.exe` or Windows MSBuild.
+## 2. 架构概览
 
-## Build And Test
+```
+SysMonCmdPal(用户态 MSIX 扩展)
+   │  SHM v2 单向读 + 事件通知
+   ▼
+SysMonBroker(可选,提升权限,独立分发)
+   │  传感器采集
+   ▼
+Broker SHM → HWiNFO → D3DKMT → PDH → ThermalZone(自动回退链)
+```
+
+- **主扩展**:用户态 MSIX(runFullTrust),负责 UI 与命令面板集成;不持有独立定时器,统一走 `DockBandRefreshCoordinator` 共享 1s 刷新。
+- **SysMonBroker**:独立分发的提升进程,传感器采集后单向写入共享内存;`SystemInfoService.Refresh()` 必须并发守卫。
+- **数据回退**:传感器数据有新鲜度时限,过期自动回退下一级来源,链路全自动,不允许配置项覆盖(如旧 `PrecisionMode` 可读写兼容但不得越过回退链)。
+- **兼容性**:SHM v2 布局、COM 契约、资源文件与测试须同步修改,保持读写端一致。
+
+## 3. 目录结构
+
+```
+sysmon-cmdpal/
+├── SysMonCmdPal/            # 主扩展(命令面板、页面、DockBand、设置)
+│   ├── Services/            # SystemInfoService、传感器回退链、GpuAdapterEnumerator 等
+│   └── Strings/{en-US,zh-CN}/Resources.resw   # 本地化资源(须同步)
+├── SysMonBroker/            # 提升权限 Broker(独立分发,dotnet publish 产物)
+├── SysMonCmdPal.Tests/      # xUnit 测试(共享内存协议、读端状态机等)
+├── PowerToys-sdk/           # PowerToys SDK 依赖
+├── release/                 # MSIX/broker 发布产物(每目标最多 3 个历史版本)
+└── AGENTS.md / CLAUDE.md    # 本技术文档
+```
+
+## 4. 构建与测试
+
+Windows 工具链必需(MSIX/AppX 打包依赖 Windows 侧 MSBuild 任务)。从 WSL 调用时用 `wslpath -w` 转路径 + `pwsh.exe`:
 
 ```powershell
 $msbuild = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
-& $msbuild SysMonCmdPal.sln /p:Configuration=Debug /p:Platform=x64 /m /restore `
-  /p:VcpkgEnabled=false /p:EnforceCodeStyleInBuild=false
-dotnet test SysMonCmdPal.Tests\SysMonCmdPal.Tests.csproj
+& $msbuild SysMonCmdPal.Tests/SysMonCmdPal.Tests.csproj /t:Build /p:Configuration=Debug /p:Platform=x64 /restore
+& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\18\BuildTools\Common7\IDE\CommonExtensions\Microsoft\TestWindow\vstest.console.exe" `
+  "SysMonCmdPal.Tests/bin/x64/Debug/net10.0-windows10.0.26100.0/SysMonCmdPal.Tests.dll"
 ```
 
-- Use `dotnet publish` for `SysMonBroker` only when producing the standalone broker.
-- Keep Release trimming/AOT properties compatible with WinRT/COM and Windows App SDK.
-- Put distributable artifacts under `release/sysmon-cmdpal/<target>/` and keep at most 3 historical builds.
+- 纯 `dotnet test` 会因缺 VS 的 AppxPackage PRI 任务失败(MSB4062),属环境限制,须用上述 MSBuild + vstest 组合。
+- Release 的 trimming/AOT 属性须与 WinRT/COM、Windows App SDK 兼容。
+- 环境要求:Windows 11、PowerToys、开发者模式、Windows App SDK 1.6、VS Build Tools 2026、.NET SDK 10.0.300+。
 
-## Architecture
+## 5. 运行与部署
 
-- Main extension remains user-mode MSIX with `runFullTrust`.
-- Optional `SysMonBroker` is elevated, independently distributed, and communicates one-way through Shared Memory v2 plus event notification.
-- Preserve SHM v2 layout compatibility unless all producers/consumers and tests are updated together.
-- Sensor freshness is time-bound; stale broker data must fall back automatically.
-- Fallback chain must remain automatic: Broker SHM -> HWiNFO -> D3DKMT -> PDH -> ThermalZone where applicable.
-- Do not add independent timers to pages or Dock Bands; use `DockBandRefreshCoordinator` and shared 1s refresh.
-- `SystemInfoService.Refresh()` must remain concurrency guarded.
-- Settings compatibility fields such as old `PrecisionMode` may be read/written back, but must not override the automatic sensor fallback chain.
+- 扩展本体:MSIX 安装(仓库 `release/` 下产物,当前版本线 1.5.x,未签名,接受 SmartScreen 警告)。
+- Broker:`SysMonBroker` 独立发布,可经 `gsudo` 部署;Broker 启停涉及 UAC,有 `gsudo` 时避免重复弹窗。
+- 测试验证:仓库内 300 个 xUnit 用例全绿为合入基准。
 
-## Resources And Localization
+## 6. 关键约束
 
-- Keep `Strings/en-US/Resources.resw` and `Strings/zh-CN/Resources.resw` synchronized for visible UI text.
-- User-facing commands, diagnostics, and settings labels should use resource lookups rather than hard-coded strings.
-- Do not leak raw exception details containing paths or environment data into user-facing UI.
+- **回退链不可破坏**:Broker SHM → HWiNFO → D3DKMT → PDH → ThermalZone 顺序与自动语义;传感器数据时间受限,过期必须回退。
+- **共享刷新**:不得给页面/Dock Band 加独立定时器,统一用 `DockBandRefreshCoordinator` 的 1s 刷新。
+- **本地化**:`Strings/en-US` 与 `Strings/zh-CN` 的 `Resources.resw` 同步;用户可见文案走资源查找,禁止硬编码;不向 UI 泄漏含路径/环境信息的原始异常。
+- **权限边界**:COM/SHM/进程控制面必须保持认证与 ACL 假设显式;经 broker 终止进程须保留鉴权与 Win32 错误上报。
+- **SHM 兼容**:SHM v2 布局变更必须生产者/消费者/测试同步更新。
+- **探索**:优先 code-review-graph,回退 `rg`/读文件;编辑前查 `git status`(本仓库常有进行中的工作)。
 
-## Privilege Boundaries
+## 7. 开发约定
 
-- Broker start/stop/deploy actions may require `gsudo`; avoid repeated UAC prompts when `gsudo` is available.
-- COM, SHM, and process-control surfaces must keep authentication and ACL assumptions explicit.
-- Process termination through broker paths must preserve authorization checks and Win32 error reporting.
+- 提交信息用中文,带 `feat/fix/chore/docs/test` 前缀,描述实际变更。
+- 提交/推送前跑测试(Windows 工具链);构建产物放 `release/sysmon-cmdpal/<target>/`,最多 3 个历史版本。
+- 架构/结构变化时同步更新本文件与 `CLAUDE.md`。
