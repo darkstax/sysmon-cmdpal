@@ -37,3 +37,8 @@ release/
 # Mono 密封缓存
 .mono/
 SysMonCmdPal/.mono/
+
+# DevMode runtime artifacts (dev build only)
+.devmode_marker
+.devmode_on
+.devmode

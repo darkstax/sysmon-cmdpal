@@ -1,9 +1,14 @@
-// SysMonBroker — LHM thin-shell + Shared Memory IPC (v2.4)
-// Runs as admin. Provides sensor data via SharedMemory v2 to SysMonCmdPal plugin.
+// SysMonBroker — LHM thin-shell + Shared Memory IPC + Admin Pipe (v2.5)
+// Runs as admin. Provides sensor data via SharedMemory v2 to SysMonCmdPal plugin,
+// and an admin-privilege proxy named pipe for btop4win (protocol: ai-code/btop4win-broker-ipc.md).
 //
 // Usage:
-//   SysMonBroker.exe   — normal mode (LHM + SHM)
+//   SysMonBroker.exe                — normal mode (LHM + SHM + AdminPipe)
+//   SysMonBroker.exe --devmode-on   — enable DevMode at runtime (dev build + marker required)
+//   SysMonBroker.exe --devmode-off  — disable DevMode at runtime
 //
+// v2.5: Adds named-pipe admin proxy (AUTH/PING/TERMINATE/SERVICE_CONTROL) +
+//       re-adds DevMode gate (compile-time path + marker + runtime flag).
 // v2.4: Adds atomic SMX1 commits, instance identity, and a writer lease.
 // v2.3: Removed COM Local Server (btop4win no longer reads it).
 //       Removed JSON snapshot (only btop4win consumed it).
@@ -42,9 +47,13 @@ internal static class Program
             Thread.Sleep(500);
         };
 
-        Log($"=== SysMonBroker v2.4 starting (standalone SHM mode) ===");
+        Log($"=== SysMonBroker v2.5 starting (SHM + AdminPipe mode) ===");
 
         s_startTimestamp = Stopwatch.GetTimestamp();
+
+        // --devmode-on / --devmode-off: 运行时 DevMode 开关(dev 构建 + marker 才能设置)
+        if (args.Contains("--devmode-on") || args.Contains("--devmode-off"))
+            return DevModeToggle(args.Contains("--devmode-on"));
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
@@ -58,9 +67,14 @@ internal static class Program
 
         SensorCollector? collector = null;
         BrokerSharedMemory? shm = null;
+        BrokerAdminPipeServer? adminPipe = null;
 
         try
         {
+            Log("Creating AdminPipe server...");
+            adminPipe = new BrokerAdminPipeServer();
+            adminPipe.Start();
+
             Log("Creating SharedMemory v2 + SMX1...");
             shm = new BrokerSharedMemory();
             Log($"SharedMemory: {BrokerSharedMemory.MapName} (size={BrokerSharedMemory.MapSize}, " +
@@ -149,6 +163,8 @@ internal static class Program
         {
             Log("Shutting down...");
             // 每个 Dispose 独立容错：任一失败不得中断 stopped 日志 / Flush / 退出码语义（R01）
+            try { adminPipe?.Stop(); }
+            catch (Exception ex) { Log($"WARN: AdminPipe stop failed: {ex.Message}"); }
             try { shm?.Dispose(); }
             catch (Exception ex) { Log($"WARN: SharedMemory dispose failed: {ex.Message}"); }
             try { collector?.Dispose(); }
@@ -214,4 +230,22 @@ internal static class Program
     };
 
     static void Log(string msg) => BrokerLogger.Log(msg);
+
+    // --devmode-on / --devmode-off: 检查 dev build + marker, 然后创建/删除 .devmode_on 文件。
+    // 用文件 flag 而非内存变量, 使所有 broker 进程共享状态(与旧版 COM 时代设计一致)。
+    static int DevModeToggle(bool enable)
+    {
+        if (!DevModeVerifier.IsDevBuild)
+        {
+            Log("DevMode: not a dev build (no DevRepoPath embedded); build with -p:Dev=true");
+            return 1;
+        }
+        if (DevModeVerifier.SetRuntimeOverride(enable))
+        {
+            Log($"DevMode: {(enable ? "ON" : "OFF")} — file flag updated, all broker processes will honor it");
+            return 0;
+        }
+        Log("DevMode: toggle failed (marker missing?); create .devmode_marker in the project dir");
+        return 1;
+    }
 }
