@@ -20,15 +20,16 @@ SysMonCmdPal(用户态 MSIX 扩展)
    │  SHM v2 单向读 + 事件通知
    ▼
 SysMonBroker(可选,提升权限,独立分发)
-   │  传感器采集
-   ▼
+   │  传感器采集                   命名管道权限代理(btop4win 等客户端)
+   ▼                               ▲
 Broker SHM → HWiNFO → D3DKMT → PDH → ThermalZone(自动回退链)
 ```
 
 - **主扩展**:用户态 MSIX(runFullTrust),负责 UI 与命令面板集成;不持有独立定时器,统一走 `DockBandRefreshCoordinator` 共享 1s 刷新。
-- **SysMonBroker**:独立分发的提升进程,传感器采集后单向写入共享内存;`SystemInfoService.Refresh()` 必须并发守卫。
+- **SysMonBroker**:独立分发的提升进程(计划任务 `RunLevel=Highest`),传感器采集后单向写入共享内存;`SystemInfoService.Refresh()` 必须并发守卫。
+- **AdminPipe(btop4win 权限代理)**:broker 以管理员运行,监听 `\\.\pipe\SysMonBrokerAdmin`(协议见工作区根 `btop4win-broker-ipc.md` §2):AUTH(白名单 `%LOCALAPPDATA%\SysMonCmdPal\registered_hashes.txt` 热更新,客户端自助注册)/ PING / TERMINATE(代理终止管理员进程)/ SERVICE_CONTROL(保留);DevMode(dev 构建 + marker + 运行时开关)仅供本地联调。
 - **数据回退**:传感器数据有新鲜度时限,过期自动回退下一级来源,链路全自动,不允许配置项覆盖(如旧 `PrecisionMode` 可读写兼容但不得越过回退链)。
-- **兼容性**:SHM v2 布局、COM 契约、资源文件与测试须同步修改,保持读写端一致。
+- **兼容性**:SHM v2 布局、管道协议、资源文件与测试须同步修改,保持读写端一致。
 
 ## 3. 目录结构
 
