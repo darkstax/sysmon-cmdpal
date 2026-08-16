@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Xunit;
 
 namespace SysMonCmdPal.Tests;
@@ -302,7 +303,9 @@ public class BrokerInstallerTests
 
     private static byte[] ReleaseBody(string? digest, bool includeDigest)
     {
-        var asset = new Dictionary<string, object?>
+        // AOT/Trim 安全：与产品代码一致，用 JsonNode DOM 构建，不用反射序列化
+        // （裁剪模式下 JsonSerializer.Serialize(反射) 被禁用）
+        var asset = new JsonObject
         {
             ["name"] = "SysMonBroker-win-x64.exe",
             ["browser_download_url"] =
@@ -313,11 +316,12 @@ public class BrokerInstallerTests
         if (includeDigest)
             asset["digest"] = digest;
 
-        return JsonSerializer.SerializeToUtf8Bytes(new
+        var root = new JsonObject
         {
-            draft = false,
-            assets = new[] { asset },
-        });
+            ["draft"] = false,
+            ["assets"] = new JsonArray(asset),
+        };
+        return Encoding.UTF8.GetBytes(root.ToJsonString());
     }
 
     private static Task WaitForPhaseAsync(

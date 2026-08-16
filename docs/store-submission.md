@@ -173,6 +173,51 @@ Recommended draft values:
 Do not submit for certification until package version, listing assets, Broker
 release/signing decision, and final user approval are complete.
 
+## Certification Failure 1 (2026-08-12) and Fix (2026-08-14)
+
+### Failure
+
+- Policy **10.1.2.10 Functionality**: "The product crashes at launch" (Error Message: N/A)
+- Test device: Microsoft Surface Laptop 5, **OS build 26200.8655** (KB5094126, 2026-06-09 —
+  already 5 updates behind the 2026-08-12 review date; latest was 26200.9168 on 08-11)
+- Only failure item in the report.
+
+### Root cause analysis
+
+- The package is an extension without a standalone UI; `SysMonCmdPal.exe` is an
+  out-of-process COM server activated by Command Palette with
+  `-RegisterProcessAsComServer`. Without arguments the process exited immediately
+  (exit code 0, no WER record possible) — consistent with "Error Message: N/A".
+- Certification harnesses typically launch the main entry point without arguments,
+  so any Command Palette extension would be misread as "crash at launch".
+- Official docs (creating-an-extension / publish-extension-store) define no
+  no-argument startup behavior; the SDK template itself exits immediately.
+
+### Fixes applied (2026-08-14)
+
+1. `Program.cs`: no-argument startup now shows a bilingual usage MessageBox on an
+   STA thread and keeps the process alive until dismissed (COM path unchanged).
+2. `SysMonCmdPal.csproj`: added `AppxPackageIdentityName` / `AppxPackagePublisher` /
+   `AppxPackageVersion` (Partner Center values, per publish-extension-store doc).
+3. Assets: added `SmallTile.png` (71×71) and `LargeTile.png` (310×310) — store
+   validation expects them; `generate_icons.ps1` updated to regenerate them.
+4. `Package.appxmanifest`: DefaultTile now references Square71x71Logo/Square310x310Logo.
+   (PrepareAssets target intentionally omitted — our Assets already ship both
+   base-name and scale-200 files at correct sizes; copying scale-200 over base
+   names as the doc suggests would replace correct sizes with doubled ones.)
+5. `SysMonCmdPal.csproj`: Asset Content switched to `Assets\**\*.png` wildcard.
+
+### Still pending (next submission)
+
+- Build + `dotnet test` verification on Windows (CsWinRT toolchain is Windows-only;
+  cannot be verified from Linux).
+- Ship x64 + ARM64 as one `.msixbundle` (official flow; only x64 was submitted).
+- Dispute email to `reportapp@microsoft.com`: request WER/crash-dump evidence,
+  point out stale test build 26200.8655 vs review date, explain extension
+  no-UI/COM-server startup model.
+- Rebuild the 1.5.0.0 Store-associated MSIX with the new manifest/assets and
+  validate in the draft before resubmitting.
+
 ## Screenshot Set
 
 Prepare clean 16:9 PNG screenshots at native desktop resolution:

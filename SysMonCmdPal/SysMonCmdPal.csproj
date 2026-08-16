@@ -40,9 +40,14 @@
     <Product>SysMonCmdPal</Product>
     <Description>PowerToys Command Palette 系统监控扩展</Description>
     <Copyright>Copyright (c) 2026 darkstax</Copyright>
-    <AssemblyVersion>1.5.0.0</AssemblyVersion>
-    <FileVersion>1.5.0.0</FileVersion>
-    <Version>1.5.0.0</Version>
+    <AssemblyVersion>1.6.0.0</AssemblyVersion>
+    <FileVersion>1.6.0.0</FileVersion>
+    <Version>1.6.0.0</Version>
+
+    <!-- 商店打包标识（Partner Center 值，见 publish-extension-store 文档） -->
+    <AppxPackageIdentityName>darkstax.SysPulseforCommandPalette</AppxPackageIdentityName>
+    <AppxPackagePublisher>CN=B58A0E15-179C-417E-BD92-D081080DA9A7</AppxPackagePublisher>
+    <AppxPackageVersion>1.6.0.0</AppxPackageVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -62,12 +67,9 @@
     <Content Include="Public\manifest.json" />
   </ItemGroup>
 
-  <!-- Assets -->
+  <!-- Assets（通配包含全部图标，含 SmallTile/LargeTile） -->
   <ItemGroup>
-    <Content Include="Assets\StoreLogo.png" />
-    <Content Include="Assets\Square150x150Logo.png" />
-    <Content Include="Assets\Square44x44Logo.png" />
-    <Content Include="Assets\Wide310x150Logo.png" />
+    <Content Include="Assets\**\*.png" />
   </ItemGroup>
 
   <ItemGroup>

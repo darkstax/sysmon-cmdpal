@@ -203,6 +203,16 @@ Save-ScaledCopy "$OutputDir\Square44x44Logo.scale-200.png" "$OutputDir\Square44x
 Write-Host "  -> Square44x44Logo OK" -ForegroundColor Green
 
 # ============================================================
+# 3.5 SmallTile (71x71) + LargeTile (310x310)
+# 商店验证要求的基础 tile 文件（从 Square150x150Logo.scale-200 缩放）
+# ============================================================
+Write-Host "Generating SmallTile + LargeTile..." -ForegroundColor Cyan
+
+Save-ScaledCopy "$OutputDir\Square150x150Logo.scale-200.png" "$OutputDir\SmallTile.png" 71 71
+Save-ScaledCopy "$OutputDir\Square150x150Logo.scale-200.png" "$OutputDir\LargeTile.png" 310 310
+Write-Host "  -> SmallTile (71x71) + LargeTile (310x310) OK" -ForegroundColor Green
+
+# ============================================================
 # 4. Wide310x150Logo (scale-200 = 620x300, scale-100 = 310x150)
 # ============================================================
 Write-Host "Generating Wide310x150Logo..." -ForegroundColor Cyan
