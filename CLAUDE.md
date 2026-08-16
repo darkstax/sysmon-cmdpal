@@ -6,7 +6,7 @@
 
 - PowerToys Command Palette 系统监控扩展(C#/.NET 10 + Windows App SDK 1.6,MSIX)。
 - 可选 SysMonBroker(提升权限,独立分发)经 SHM v2 单向提供传感器数据。
-- Broker 另监听命名管道 `\\.\pipe\SysMonBrokerAdmin`(btop4win 权限代理,协议见工作区根 `btop4win-broker-ipc.md` §2)。
+- Broker 另监听命名管道 `\\.\pipe\SysMonBrokerAdmin`(btop4win 权限代理,协议见工作区根 `btop4win-broker-ipc.md` §2);计划任务以**交互用户 + Highest** 运行(非 SYSTEM,保证白名单 LOCALAPPDATA 与客户端一致)。
 
 ## 常用命令
 

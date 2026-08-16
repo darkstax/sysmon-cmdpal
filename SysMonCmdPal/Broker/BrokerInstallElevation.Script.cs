@@ -231,11 +231,16 @@ function Test-IsSystemPrincipal([string]$UserId) {
     }
 }
 
-function Assert-SystemTaskModel([object]$Task) {
+function Assert-ManagedTaskModel([object]$Task) {
     Assert-ManagedTaskAction $Task $targetExe $targetDirectory
-    if (-not (Test-IsSystemPrincipal ([string]$Task.Principal.UserId)) -or
-        $Task.Principal.RunLevel.ToString() -ne 'Highest' -or
-        $Task.Principal.LogonType.ToString() -ne 'ServiceAccount') {
+    # 任务必须以安装用户(非 SYSTEM) + Highest + InteractiveToken 运行:
+    # broker 需读取与客户端同路径的白名单(%LOCALAPPDATA%\SysMonCmdPal\registered_hashes.txt,
+    # 协议 btop4win-broker-ipc.md §2.5); SYSTEM 的 LOCALAPPDATA 指向 systemprofile,
+    # 读不到用户白名单 → AUTH 恒拒绝(管道权限代理失效)。
+    $p = $Task.Principal
+    if ((Test-IsSystemPrincipal ([string]$p.UserId)) -or
+        $p.RunLevel.ToString() -ne 'Highest' -or
+        $p.LogonType.ToString() -ne 'InteractiveToken') {
         throw 'The Broker task principal validation failed.'
     }
     $triggers = @($Task.Triggers)
@@ -510,7 +515,9 @@ try {
 
     $taskAction = New-ScheduledTaskAction -Execute $targetExe -WorkingDirectory $targetDirectory
     $taskTrigger = New-ScheduledTaskTrigger -AtLogOn
-    $taskPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest -LogonType ServiceAccount
+    # 以安装用户运行(非 SYSTEM): 白名单 LOCALAPPDATA 与客户端一致; 管理员 token 可建 Global 共享内存
+    $installUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $taskPrincipal = New-ScheduledTaskPrincipal -UserId $installUser -RunLevel Highest -LogonType InteractiveToken
     $taskSettings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) `
@@ -525,7 +532,7 @@ try {
         -Description 'SysMonCmdPal Broker for elevated hardware sensor access' `
         -Force | Out-Null
     $registeredTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
-    Assert-SystemTaskModel $registeredTask
+    Assert-ManagedTaskModel $registeredTask
 
     $healthStart = [DateTime]::UtcNow.AddSeconds(-2)
     Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
@@ -544,7 +551,7 @@ try {
     }
     if (-not $healthyProcess) { throw 'The scheduled Broker process failed path validation.' }
     Wait-BrokerSharedMemoryHealthy ([DateTime]::UtcNow.AddSeconds(30))
-    Assert-SystemTaskModel (Get-ScheduledTask -TaskName $taskName -ErrorAction Stop)
+    Assert-ManagedTaskModel (Get-ScheduledTask -TaskName $taskName -ErrorAction Stop)
 
     if ($hadOldUninstall) {
         [IO.File]::Replace($stagedUninstall, $uninstallScript, $backupUninstall, $true)

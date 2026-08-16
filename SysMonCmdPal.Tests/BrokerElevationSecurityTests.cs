@@ -29,21 +29,22 @@ public class BrokerElevationSecurityTests
     }
 
     [Fact]
-    public void InstallerScript_UsesOneAllUsersSystemTaskAndPathHealthCheck()
+    public void InstallerScript_UsesOneAllUsersInteractiveUserTaskAndPathHealthCheck()
     {
         string script = BuildInstallerScript();
 
         Assert.Contains("$taskTrigger = New-ScheduledTaskTrigger -AtLogOn", script);
         Assert.Contains(
-            "New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest -LogonType ServiceAccount",
+            "New-ScheduledTaskPrincipal -UserId $installUser -RunLevel Highest -LogonType InteractiveToken",
             script);
         Assert.Contains("$triggers.Count -ne 1", script);
         Assert.Contains("MSFT_TaskLogonTrigger", script);
-        Assert.Contains("Assert-SystemTaskModel $registeredTask", script);
+        Assert.Contains("Assert-ManagedTaskModel $registeredTask", script);
         Assert.Contains("$candidate.StartTime.ToUniversalTime() -ge $healthStart", script);
         Assert.Contains("Test-PathEquals $processPath $targetExe", script);
         Assert.Contains("Stop-Process -Id $process.Id", script);
         Assert.DoesNotContain("New-ScheduledTaskPrincipal -UserId $userSid", script);
+        Assert.DoesNotContain("New-ScheduledTaskPrincipal -UserId 'SYSTEM'", script);
         Assert.DoesNotContain(
             "Get-Process -Name 'SysMonBroker' -ErrorAction SilentlyContinue |",
             script);
@@ -73,7 +74,7 @@ public class BrokerElevationSecurityTests
             script,
             "if (-not $healthyProcess) { throw 'The scheduled Broker process failed path validation.' }",
             "Wait-BrokerSharedMemoryHealthy ([DateTime]::UtcNow.AddSeconds(30))",
-            "Assert-SystemTaskModel (Get-ScheduledTask -TaskName $taskName -ErrorAction Stop)");
+            "Assert-ManagedTaskModel (Get-ScheduledTask -TaskName $taskName -ErrorAction Stop)");
     }
 
     [Fact]
