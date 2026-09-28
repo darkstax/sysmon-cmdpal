@@ -33,6 +33,12 @@ internal sealed class HwinfoSharedMemoryReader : IDisposable
 
     // Header field indices (as int32 array from base)
     private const int HdrSignature = 0;   // offset 0
+    private const int HdrVersion1 = 1;     // offset 4
+    private const int HdrVersion2 = 2;     // offset 8
+    private const int HdrUnitsOffset = 5;  // offset 20：units(分组) 数组起点
+    private const int HdrUnitSize = 6;     // offset 24
+    private const int HdrUnitCount = 7;    // offset 28
+    private const int UnitNameField = 8;   // unit 记录内名称字段偏移
     private const int HdrEntryOffset = 8;  // offset 32: byte offset to first entry
     private const int HdrEntrySize = 9;    // offset 36: size per entry
     private const int HdrEntryCount = 10;  // offset 40: number of entries
@@ -52,6 +58,13 @@ internal sealed class HwinfoSharedMemoryReader : IDisposable
     private bool _available;
     private DateTime _firstOpenTime = DateTime.MinValue;
     private DateTime _lastRetryTime = DateTime.MinValue;
+    // ---- units 解析面（T2-1：GPU 归属的稳定分组来源） ----
+    private byte[]? _unitNameBuf;
+    private bool _unitsAvailable;
+    private string _unitsNote = "";
+    private int _version1;
+    private int _version2;
+    private string _lastDiag = "";
     private static readonly TimeSpan RetryCooldown = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan TwelveHourWarning = TimeSpan.FromHours(12);
     private readonly object _lock = new();
@@ -105,7 +118,9 @@ internal sealed class HwinfoSharedMemoryReader : IDisposable
                 int sig = _accessor.ReadInt32(0);
                 if ((uint)sig != HwinfoSignature)
                 {
-                    Debug.WriteLine($"[HWiNFO] Invalid signature: 0x{sig:X8} (expected 0x{HwinfoSignature:X8})");
+                    // 诊断（T2-1 必做项）：原为仅 Debug.WriteLine —— trim 宿主下
+                    // 「从未 Connected」与「签名不符/无权限/布局失败」在日志里不可区分。
+                    LogState($"header signature mismatch: 0x{sig:X8} (expected 0x{HwinfoSignature:X8})");
                     Cleanup();
                     return;
                 }
@@ -114,11 +129,17 @@ internal sealed class HwinfoSharedMemoryReader : IDisposable
                 _entrySize = _accessor.ReadInt32(HdrEntrySize * 4);
                 _entryCount = _accessor.ReadInt32(HdrEntryCount * 4);
 
+                // 布局 fail-fast（此前 §7 声称的「格式变更自动禁用」只实现了范围检查那一半）：
+                // 必须把 entrySize 与硬编码字段偏移交叉验证，否则记录被撑大/挪字段时
+                // 会通过校验并按老偏移静默读出垃圾。
+                // 断言用**不等式**，不把本机实测的 460/392 当必需值。
                 if (_entrySize < 160 || _entrySize > 1024 ||
                     _entryOffset <= 0 || _entryOffset > 65536 ||
-                    _entryCount <= 0 || _entryCount > 4096)
+                    _entryCount <= 0 || _entryCount > 4096 ||
+                    _entrySize < HwinfoSharedMemoryLayout.EntryValue + sizeof(double))
                 {
-                    Debug.WriteLine($"[HWiNFO] Invalid layout: offset={_entryOffset} size={_entrySize} count={_entryCount}");
+                    LogState($"layout rejected: offset={_entryOffset} size={_entrySize} count={_entryCount} " +
+                             $"(需 size>={HwinfoSharedMemoryLayout.EntryValue + sizeof(double)} 以容下 value 字段)");
                     Cleanup();
                     return;
                 }
@@ -127,11 +148,21 @@ internal sealed class HwinfoSharedMemoryReader : IDisposable
                 _available = true;
                 _firstOpenTime = DateTime.UtcNow;
 
-                SensorLogger.ForceLog($"[HWiNFO] Connected: {_entryCount} sensors, entrySize={_entrySize}");
+                // units 解析面尽力初始化（越界/字段不足 ⇒ 只禁用该面，entries 面照常工作）
+                TryLoadUnitsFace();
+
+                // header version 打点（本机实测 2/2；HWiNFO 7.33 changelog 声明布局有变而
+                // 「客户端应当无需改动」—— 此类「应当」不作为不校验的理由，故留版本指纹）
+                _version1 = _accessor.ReadInt32(HdrVersion1 * 4);
+                _version2 = _accessor.ReadInt32(HdrVersion2 * 4);
+                SensorLogger.ForceLog(
+                    $"[HWiNFO] Connected: {_entryCount} sensors, entrySize={_entrySize} " +
+                    $"version={_version1}/{_version2} unitsFace={_unitsAvailable} {_unitsNote}");
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[HWiNFO] Init exception: {ex.Message}");
+                // OpenExisting 在非高完整性宿主下可能 UnauthorizedAccess；原实现只 Debug.WriteLine
+                LogState($"init failed: {ex.GetType().Name}: {Trim(ex.Message)}");
                 Cleanup();
             }
         }
@@ -144,7 +175,159 @@ internal sealed class HwinfoSharedMemoryReader : IDisposable
         _mmf?.Dispose();
         _mmf = null;
         _labelBuf = null;
+        _unitNameBuf = null;
+        _unitsAvailable = false;
+        _unitsNote = "disconnected";
         _available = false;
+    }
+
+    // ========================================================================
+    // units（硬件分组）解析面 —— T2-1 新增面，不影响既有 entries 侧方法
+    // ========================================================================
+
+    /// <summary>
+    /// 加载 units 数组。任何越界/字段不足/头信息异常 ⇒ 仅禁用本解析面
+    /// （<see cref="_unitsAvailable"/>=false + 原因），entries 面照常可用，
+    /// 消费端据此退回保守归属（见 GpuHwinfoAssociation.AssociateWithoutUnits）。
+    /// 调用方已持 _lock 且已完成 entries 布局校验。
+    /// </summary>
+    private void TryLoadUnitsFace()
+    {
+        _unitsAvailable = false;
+        _unitsNote = "";
+        try
+        {
+            var acc = _accessor;
+            if (acc == null) { _unitsNote = "no accessor"; return; }
+
+            int unitsOffset = acc.ReadInt32(HdrUnitsOffset * 4);
+            int unitSize = acc.ReadInt32(HdrUnitSize * 4);
+            int unitCount = acc.ReadInt32(HdrUnitCount * 4);
+
+            if (unitsOffset <= 0 || unitSize <= 0 || unitCount <= 0 || unitCount > 4096)
+            {
+                _unitsNote = $"header absent/invalid (offset={unitsOffset} size={unitSize} count={unitCount})";
+                return;
+            }
+            // 不等式校验：unit 记录必须容得下 8B 头部 + 128B 名称字段
+            if (unitSize < UnitNameField + HwinfoStrLen)
+            {
+                _unitsNote = $"unitSize={unitSize} < required {UnitNameField + HwinfoStrLen}";
+                return;
+            }
+            // units 数组不得越过 entries 起点
+            long unitsEnd = (long)unitsOffset + (long)unitSize * unitCount;
+            if (unitsEnd > _entryOffset)
+            {
+                _unitsNote = $"units array overruns entries start ({unitsEnd} > {_entryOffset})";
+                return;
+            }
+
+            _unitNameBuf = new byte[HwinfoStrLen];
+            _unitsAvailable = true;
+            _unitsNote = $"units={unitCount}";
+        }
+        catch (Exception ex)
+        {
+            _unitsAvailable = false;
+            _unitsNote = $"units probe threw {ex.GetType().Name}";
+        }
+    }
+
+    /// <summary>units 解析面当前是否可用（诊断/测试缝隙）。</summary>
+    internal bool UnitsFaceAvailable
+    {
+        get { lock (_lock) { return _available && _unitsAvailable; } }
+    }
+
+    /// <summary>
+    /// 读取当前布局快照（units + entries 全量，纯读）。不可用/校验失败返回 null。
+    /// 与既有逐标签读取方法互不影响：既有方法签名与匹配语义全部冻结。
+    /// </summary>
+    internal HwinfoLayoutSnapshot? TryGetLayoutSnapshot()
+    {
+        lock (_lock)
+        {
+            if (!IsAvailable) return null;
+            var acc = _accessor;
+            if (acc == null) return null;
+
+            try
+            {
+                var units = new List<HwinfoUnitRecord>();
+                bool unitsOk = _unitsAvailable && _unitNameBuf != null;
+                string unitsReason = "";
+                if (unitsOk)
+                {
+                    int unitsOffset = acc.ReadInt32(HdrUnitsOffset * 4);
+                    int unitSize = acc.ReadInt32(HdrUnitSize * 4);
+                    int unitCount = acc.ReadInt32(HdrUnitCount * 4);
+                    var nameBuf = _unitNameBuf!;
+                    for (int u = 0; u < unitCount; u++)
+                    {
+                        int b = unitsOffset + unitSize * u;
+                        acc.ReadArray(b + UnitNameField, nameBuf, 0, HwinfoStrLen);
+                        units.Add(new HwinfoUnitRecord
+                        {
+                            Index = u,
+                            Id = acc.ReadInt32(b),
+                            Instance = acc.ReadInt32(b + 4),
+                            Name = DecodeLabel(nameBuf),
+                        });
+                    }
+                }
+                else
+                {
+                    unitsReason = _unitsNote;
+                }
+
+                var entries = new List<HwinfoEntryDescriptor>(_entryCount);
+                for (int i = 0; i < _entryCount; i++)
+                {
+                    int b = _entryOffset + _entrySize * i;
+                    acc.ReadArray(b + EntryLabel, _labelBuf!, 0, HwinfoStrLen);
+                    entries.Add(new HwinfoEntryDescriptor
+                    {
+                        Index = i,
+                        Type = acc.ReadInt32(b + EntryType),
+                        SensorIndex = acc.ReadInt32(b + HwinfoSharedMemoryLayout.EntrySensorIndex),
+                        Label = DecodeLabel(_labelBuf!),
+                        Value = acc.ReadDouble(b + EntryValue),
+                    });
+                }
+
+                return new HwinfoLayoutSnapshot
+                {
+                    Version1 = _version1,
+                    Version2 = _version2,
+                    EntryOffset = _entryOffset,
+                    EntrySize = _entrySize,
+                    EntryCount = _entryCount,
+                    Entries = entries,
+                    UnitsAvailable = unitsOk,
+                    UnitsUnavailableReason = unitsOk ? "" : unitsReason,
+                    Units = unitsOk ? units : [],
+                };
+            }
+            catch (Exception ex)
+            {
+                LogState($"layout snapshot read failed: {ex.GetType().Name}: {Trim(ex.Message)}");
+                _available = false;
+                return null;
+            }
+        }
+    }
+
+    private static string Trim(string s) => s.Length <= 160 ? s : s[..160] + "…";
+
+    /// <summary>诊断打点：仅在状态跃变时 ForceLog，避免 1s 刷新链刷爆 10MB 轮转日志。</summary>
+    private void LogState(string message)
+    {
+        if (string.Equals(_lastDiag, message, StringComparison.Ordinal)) return;
+        _lastDiag = message;
+        Debug.WriteLine($"[HWiNFO] {message}");
+        try { SensorLogger.ForceLog($"[HWiNFO] {message}"); }
+        catch { /* 日志失败不得影响采集 */ }
     }
 
     /// <summary>强制重置连接（HWiNFO 重启后调用）</summary>
@@ -212,183 +395,6 @@ internal sealed class HwinfoSharedMemoryReader : IDisposable
             }
 
             return (-1, "");
-        }
-    }
-
-    // ========================================================================
-    // GPU Temperature
-    // ========================================================================
-
-    private static readonly string[] GpuPreferredLabels =
-        ["GPU Core", "GPU Hot Spot", "GPU Junction", "GPU Temperature"];
-
-    /// <summary>读取第 index 个 GPU 温度（0=第一个/集显, 1=第二个/独显）。
-    /// 严格匹配 "GPU Temperature"，不匹配 Hot Spot/Memory Junction 等子项。</summary>
-    public (double Temp, string Label) ReadGpuTemp(int index = 0)
-    {
-        lock (_lock)
-        {
-            if (!_available || _accessor == null) return (-1, "");
-
-            try
-            {
-                int found = 0;
-                for (int i = 0; i < _entryCount; i++)
-                {
-                    int baseOff = _entryOffset + _entrySize * i;
-                    if (_accessor.ReadInt32(baseOff + EntryType) != HwinfoTypeTemp) continue;
-
-                    string label = ReadLabel(baseOff);
-                    double val = ReadValue(baseOff);
-                    if (val <= 0 || val > 150) continue;
-
-                    // 只匹配精确的 "GPU Temperature"（排除 Hot Spot / Memory Junction / Thermal Limit）
-                    if (!label.Equals("GPU Temperature", StringComparison.OrdinalIgnoreCase))
-                        continue;
-
-                    if (found == index)
-                        return (val, label);
-                    found++;
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[HWiNFO] ReadGpuTemp exception: {ex.Message}");
-                _available = false;
-            }
-
-            return (-1, "");
-        }
-    }
-
-    /// <summary>
-    /// 读取 GPU 使用率。返回 (独显CoreLoad%, 集显Utilization%)。
-    /// 独显优先 GPU Core Load，集显用 GPU Utilization。
-    /// </summary>
-    public (double DgpuLoad, double IgpuLoad, string DgpuLabel, string IgpuLabel) ReadGpuUsageAll()
-    {
-        lock (_lock)
-        {
-            if (!_available || _accessor == null) return (-1, -1, "", "");
-
-            try
-            {
-                double dgpu = -1, igpu = -1;
-                string dgpuLabel = "", igpuLabel = "";
-
-                for (int i = 0; i < _entryCount; i++)
-                {
-                    int baseOff = _entryOffset + _entrySize * i;
-                    if (_accessor.ReadInt32(baseOff + EntryType) != HwinfoTypeUsage) continue;
-
-                    string label = ReadLabel(baseOff);
-                    double val = ReadValue(baseOff);
-                    if (val < 0 || val > 100) continue;
-
-                    // 独显：GPU Core Load（精确匹配，不用 D3D Usage 回退避免匹配到集显的 D3D）
-                    if (dgpu < 0 && label.Contains("GPU Core Load", StringComparison.OrdinalIgnoreCase))
-                    {
-                        dgpu = val;
-                        dgpuLabel = label;
-                    }
-                    // 集显：GPU Utilization
-                    else if (igpu < 0 && label.Contains("GPU Utilization", StringComparison.OrdinalIgnoreCase))
-                    {
-                        igpu = val;
-                        igpuLabel = label;
-                    }
-
-                    if (dgpu >= 0 && igpu >= 0) break;
-                }
-
-                return (dgpu, igpu, dgpuLabel, igpuLabel);
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[HWiNFO] ReadGpuUsageAll exception: {ex.Message}");
-                _available = false;
-            }
-
-            return (-1, -1, "", "");
-        }
-    }
-
-    /// <summary>
-    /// 读取 GPU 显存使用率 (%)。匹配 GPU Memory Usage。
-    /// </summary>
-    public (double Usage, string Label) ReadGpuMemoryUsage()
-    {
-        lock (_lock)
-        {
-            if (!_available || _accessor == null) return (-1, "");
-
-            try
-            {
-                for (int i = 0; i < _entryCount; i++)
-                {
-                    int baseOff = _entryOffset + _entrySize * i;
-                    if (_accessor.ReadInt32(baseOff + EntryType) != HwinfoTypeUsage) continue;
-
-                    string label = ReadLabel(baseOff);
-                    double val = ReadValue(baseOff);
-                    if (val < 0 || val > 100) continue;
-
-                    if (label.Contains("GPU Memory Usage", StringComparison.OrdinalIgnoreCase))
-                        return (val, label);
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[HWiNFO] ReadGpuMemoryUsage exception: {ex.Message}");
-                _available = false;
-            }
-
-            return (-1, "");
-        }
-    }
-
-    /// <summary>
-    /// 读取 GPU 显存 (MB)。返回 (已分配MB, 可用MB, 总量MB)。
-    /// 匹配标签：GPU Memory Allocated + GPU Memory Available。
-    /// 总量 = 已分配 + 可用。如果没有这两个标签返回 (-1, -1, -1)。
-    /// </summary>
-    public (double UsedMB, double AvailableMB, double TotalMB) ReadGpuMemoryMB()
-    {
-        lock (_lock)
-        {
-            if (!_available || _accessor == null) return (-1, -1, -1);
-
-            try
-            {
-                double allocated = -1, available = -1;
-                for (int i = 0; i < _entryCount; i++)
-                {
-                    int baseOff = _entryOffset + _entrySize * i;
-                    if (_accessor.ReadInt32(baseOff + EntryType) != HwinfoTypeData) continue;
-
-                    string label = ReadLabel(baseOff);
-                    double val = ReadValue(baseOff);
-                    if (val < 0) continue;
-
-                    if (label.Contains("GPU Memory Allocated", StringComparison.OrdinalIgnoreCase))
-                        allocated = val;
-                    else if (label.Contains("GPU Memory Available", StringComparison.OrdinalIgnoreCase))
-                        available = val;
-                }
-
-                if (allocated >= 0 && available >= 0)
-                {
-                    double total = allocated + available;
-                    return (allocated, available, total);
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[HWiNFO] ReadGpuMemoryMB exception: {ex.Message}");
-                _available = false;
-            }
-
-            return (-1, -1, -1);
         }
     }
 
@@ -555,6 +561,10 @@ internal sealed class HwinfoSharedMemoryReader : IDisposable
         while (len < HwinfoStrLen && buf[len] != 0) len++;
         return len > 0 ? Encoding.ASCII.GetString(buf, 0, len) : "";
     }
+
+    /// <summary>units 面/快照用的解码（委托布局层统一实现；与既有 ReadLabel 的 ASCII 语义在纯 ASCII 标签上等价）</summary>
+    private static string DecodeLabel(byte[] buf) =>
+        HwinfoSharedMemoryLayout.ReadAsciiZ(buf);
 
     /// <summary>从指定条目基址读取 double 值</summary>
     private double ReadValue(int baseOffset)

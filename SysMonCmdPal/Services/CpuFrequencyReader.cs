@@ -7,7 +7,7 @@ using System.Diagnostics;
 
 namespace SysMonCmdPal;
 
-internal sealed class CpuFrequencyReader : IDisposable
+internal sealed class CpuFrequencyReader : IDisposable, ISystemInfoSource
 {
     private PerformanceCounter? _freqCounter;   // Processor Frequency (基础频率 MHz)
     private PerformanceCounter? _perfCounter;   // % Processor Performance (相对基础频率的百分比)
@@ -39,6 +39,9 @@ internal sealed class CpuFrequencyReader : IDisposable
             Debug.WriteLine($"[CpuFreq] Init failed: {ex.Message}");
         }
     }
+
+    /// <summary>T1-1: 采集源入口 — 等价于原 Refresh() 中 CpuFrequency = ReadFrequency()。</summary>
+    public void ReadInto(ref SystemSnapshot snapshot) => snapshot.CpuFrequency = ReadFrequency();
 
     /// <summary>读取全核心平均实际频率 (MHz)。不可用返回 -1。</summary>
     public double ReadFrequency()

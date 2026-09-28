@@ -66,7 +66,7 @@ internal sealed partial class GpuDetailPage : ListPage, IDisposable
             {
                 Title = string.IsNullOrEmpty(gpu.Name) ? $"GPU {i + 1}" : gpu.Name,
                 Subtitle = $"{usageStr} · {tempStr} · {memStr}",
-                Icon = new IconInfo(GpuClassifier.GetIcon(gpu)),
+                Icon = new IconInfo(GpuIdentityService.GetIcon(gpu)),
             };
         }));
     }

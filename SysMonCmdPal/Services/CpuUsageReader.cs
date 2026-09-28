@@ -3,7 +3,7 @@ using System.Diagnostics;
 
 namespace SysMonCmdPal;
 
-internal sealed class CpuUsageReader
+internal sealed class CpuUsageReader : ISystemInfoSource
 {
     private PerformanceCounter? _counter;
     private readonly object _lock = new();
@@ -13,6 +13,9 @@ internal sealed class CpuUsageReader
         try { _counter = new PerformanceCounter("Processor", "% Processor Time", "_Total"); }
         catch (Exception ex) { Debug.WriteLine($"[SysMon] CPU counter init failed: {ex.Message}"); }
     }
+
+    /// <summary>T1-1: 采集源入口 — 等价于原 Refresh() 中 CpuUsage = Read()。</summary>
+    public void ReadInto(ref SystemSnapshot snapshot) => snapshot.CpuUsage = Read();
 
     public double Read()
     {

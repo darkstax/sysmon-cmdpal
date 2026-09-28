@@ -125,6 +125,18 @@ internal sealed class SharedMemoryReaderHarness : IDisposable
             ShmLayout.LegacyMapSize,
             retryCount);
 
+    /// <summary>
+    /// T2-4 观测缝隙：读回 reader 当前持有的 map 名。
+    /// Disconnect() 会把它清成空串，因此这是「确认链是否提前断连」的唯一确定性判据
+    /// （MarkUnavailable 与 5s 新鲜度过期等价，不能单独当作用户可见依据）。
+    /// 纯读，不改变任何行为。
+    /// </summary>
+    public string ConnectedMapName =>
+        RequiredField("_connectedMapName").GetValue(_reader) as string ?? "";
+
+    /// <summary>确认链是否已执行 Disconnect()（等价于 ConnectedMapName 被清空）。</summary>
+    public bool IsDisconnectedFromMap => ConnectedMapName.Length == 0;
+
     public void SetLastCounterAdvanceElapsed(TimeSpan elapsed)
     {
         long timestamp = Stopwatch.GetTimestamp() -

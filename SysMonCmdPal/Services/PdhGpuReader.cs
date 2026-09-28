@@ -1,9 +1,18 @@
 // Copyright (c) 2026 SysMonCmdPal
-// PDH GPU 利用率读取器 — 用户态，不需要管理员
+// PDH GPU 利用率读取器 — 用户态，不需要管理员，**零 COM**
 // 通过 PerformanceCounter("GPU Engine", "Utilization Percentage") 读取 GPU 利用率
-// 这是 Windows 内置的性能计数器，由 DxgKrnl 驱动发布
+// 这是 Windows 内置的性能计数器，由 DxgKrnl 驱动发布，通过 perflib 读取
 // 实例名格式: pid_<pid>_luid_0x<high>_0x<low>_phys_<n>_eng_<id>_engtype_<Type>
 // Type 包括: 3D, Compute_0, Compute_1, Copy, VideoDecode, VideoEncode, VideoProcessing 等
+//
+// T2-2 修复两条已证问题：
+//   1. LUID→名称/显存映射**不再**依赖已死的 DXGI/COM 枚举器（旧兜底写 "GPU"），
+//      改用 GpuDxgkrnlAdapters（gdi32 纯 P/Invoke + SetupDi 身份），与 D3DKMT 层共用
+//      同一个 adapter 枚举出口（不建第二套名称过滤、不建第二条 COM interop 链）。
+//   2. 空闲 0% 的卡**不再整卡消失**（旧 `if(cooked>0)` 只累计正利用率 ⇒ 0% 卡不进
+//      perGpuUsage ⇒ 从结果里蒸发，t12 定为真 bug）。修正为：只要该 LUID 本周期已建立
+//      delta 基线（有 prev 采样），即产出该卡，利用率如实可为 0。
+//      （首帧无 delta 仍不产出，属设计使然——PDH 需两次采样才能算 delta，非 bug。）
 
 using System.Diagnostics;
 
@@ -19,15 +28,20 @@ internal sealed class PdhGpuReader
     // 上一次采样的 CounterSample（按实例名索引）— 用于计算 delta
     private Dictionary<string, CounterSample> _prevSamples = new();
 
-    // LUID → GPU 名称映射
-    private Dictionary<(uint, int), string>? _luidNameMap;
+    // LUID → COM-free 枚举归属的 adapter（含名称/显存/Kind）。替代旧依赖 DXGI/COM 的映射。
+    private Dictionary<(uint, int), GpuDxgkAdapter>? _luidAdapterMap;
+
+    private readonly object _lock = new();
 
     public bool IsAvailable
     {
         get
         {
-            if (!_initAttempted) Init();
-            return _available;
+            lock (_lock)
+            {
+                if (!_initAttempted) Init();
+                return _available;
+            }
         }
     }
 
@@ -37,33 +51,58 @@ internal sealed class PdhGpuReader
         try
         {
             _available = PerformanceCounterCategory.Exists("GPU Engine");
+            // 入口诊断（t4 必做项 / t12 依据）：PDH 不吃 COM，其"归零"只能靠这条定论。
+            int instanceCount = -1;
             if (_available)
             {
-                _category = new PerformanceCounterCategory("GPU Engine");
-                // 构建 LUID → 名称映射
-                _luidNameMap = new();
-                foreach (var a in GpuAdapterEnumerator.GetAdapters())
-                    _luidNameMap[(a.LuidLow, a.LuidHigh)] = a.Name;
-                Debug.WriteLine("[PDH-GPU] GPU Engine category available");
+                try
+                {
+                    _category = new PerformanceCounterCategory("GPU Engine");
+                    instanceCount = _category.GetInstanceNames().Length;
+                }
+                catch (Exception ex)
+                {
+                    SensorLogger.ForceLog($"[GPU-PDH] instance probe failed: {ex.GetType().Name}");
+                }
+            }
+            SensorLogger.ForceLog(
+                $"[GPU-PDH] category exists={_available} instances={(instanceCount < 0 ? "n/a" : instanceCount.ToString())}");
+            if (_available)
+            {
+                _category ??= new PerformanceCounterCategory("GPU Engine");
+                // 构建 LUID → adapter 映射（COM-free；仅可归属的物理卡）
+                _luidAdapterMap = new();
+                foreach (var a in GpuDxgkrnlAdapters.GetAdapters())
+                    _luidAdapterMap[a.LuidKey] = a;
             }
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[PDH-GPU] Init failed: {ex.Message}");
+            SensorLogger.ForceLog($"[GPU-PDH] Init failed: {ex.GetType().Name}: " +
+                                  $"{(ex.Message.Length <= 160 ? ex.Message : ex.Message[..160] + "…")}");
         }
     }
 
-    /// <summary>读取所有 GPU 的利用率。返回 GpuResult 列表（仅 UsagePercent）</summary>
+    /// <summary>
+    /// 读取所有 GPU 的利用率 + 显存（T2-2）。空闲 0% 的卡仍产出（利用率 0）；
+    /// 不可归属（虚拟/副本）的 LUID 不命名、不填显存。温度不可用（-1）。
+    /// </summary>
     public List<GpuResult> ReadAll()
     {
         var results = new List<GpuResult>();
-        if (!IsAvailable || _category == null) return results;
+        PerformanceCounterCategory? category;
+        Dictionary<(uint, int), GpuDxgkAdapter>? map;
+        lock (_lock)
+        {
+            if (!IsAvailable || _category == null) return results;
+            category = _category;
+            map = _luidAdapterMap;
+        }
 
         try
         {
-            // 批量读取所有实例（一次内核调用）
-            var categoryData = _category.ReadCategory();
-            // InstanceDataCollectionCollection 索引器按计数器名返回 InstanceDataCollection
+            var categoryData = category!.ReadCategory();
             InstanceDataCollection? utilData = null;
             foreach (string key in categoryData.Keys)
             {
@@ -75,8 +114,9 @@ internal sealed class PdhGpuReader
             }
             if (utilData == null) return results;
 
-            // 按 LUID 分组，每组取所有 engine 的最大利用率
-            var perGpuUsage = new Dictionary<(uint, int), float>();
+            // 按可归属 LUID 分组：max cooked（含 0）+ 是否已建立 delta 基线
+            var perGpuMax = new Dictionary<(uint, int), float>();
+            var perGpuHasDelta = new HashSet<(uint, int)>();
             var currentNames = new HashSet<string>();
 
             foreach (InstanceData data in utilData.Values)
@@ -85,42 +125,37 @@ internal sealed class PdhGpuReader
                 currentNames.Add(instanceName);
                 var sample = data.Sample;
 
-                // 解析实例名: pid_*_luid_0x<high>_0x<low>_phys_*_eng_*_engtype_*
                 var (luidLow, luidHigh) = ParseLuid(instanceName);
                 if (luidLow == 0 && luidHigh == 0) continue;
+                var key = (luidLow, luidHigh);
 
-                // 计算利用率（需要前一次采样）
+                // 仅累计可归属物理卡（不在 COM-free 身份映射里的 LUID = 虚拟/副本，跳过命名与显存）
+                if (map is null || !map.ContainsKey(key))
+                {
+                    _prevSamples[instanceName] = sample;
+                    continue;
+                }
+
                 if (_prevSamples.TryGetValue(instanceName, out var prevSample))
                 {
                     float cooked = CounterSampleCalculator.ComputeCounterValue(prevSample, sample);
-                    if (cooked > 0)
-                    {
-                        var key = (luidLow, luidHigh);
-                        if (!perGpuUsage.TryGetValue(key, out float existing) || cooked > existing)
-                            perGpuUsage[key] = cooked;
-                    }
+                    if (float.IsNaN(cooked) || cooked < 0) cooked = 0;   // 计数器复位等异常 ⇒ 保守 0，不丢弃该卡
+                    perGpuHasDelta.Add(key);
+                    if (!perGpuMax.TryGetValue(key, out float existing) || cooked > existing)
+                        perGpuMax[key] = cooked;
                 }
 
-                // 保存当前采样供下次计算
                 _prevSamples[instanceName] = sample;
             }
 
-            // 清理已消失的实例（防止字典无限增长）
             if (_prevSamples.Count > 200)
             {
                 var toRemove = _prevSamples.Keys.Where(k => !currentNames.Contains(k)).ToList();
                 foreach (var k in toRemove) _prevSamples.Remove(k);
             }
 
-            // 构建 GpuResult
-            foreach (var (luid, usage) in perGpuUsage)
-            {
-                string name = _luidNameMap?.GetValueOrDefault(luid) ?? "GPU";
-                results.Add(new GpuResult(
-                    name,
-                    Math.Min(usage, 100),
-                    -1, 0, 0, "PDH"));
-            }
+            foreach (var r in BuildResults(perGpuHasDelta, perGpuMax, map))
+                results.Add(r);
         }
         catch (Exception ex)
         {
@@ -129,7 +164,39 @@ internal sealed class PdhGpuReader
         return results;
     }
 
-    /// <summary>从实例名解析 LUID。格式: ..._luid_0x<high>_0x<low>_...</summary>
+    /// <summary>
+    /// 纯函数（测试缝隙）：由「本周期已建立 delta 基线的 LUID 集合 + 各 LUID 的 max cooked + COM-free
+    /// 身份映射」组装 GpuResult 列表。规则（T2-2）：
+    ///   · 只要在 hasDelta 内即产出该卡 —— 利用率如实可为 0（修掉旧 `cooked>0` 使空闲卡整卡消失的真 bug）；
+    ///   · maxByGpu 缺失该 LUID（全引擎都未算出正值）⇒ 利用率 0；
+    ///   · 不在身份映射里的 LUID（虚拟/渲染节点副本）⇒ 不产出、不命名、不填显存；
+    ///   · 温度不可用（-1）；显存/Kind 来自映射。
+    /// </summary>
+    internal static List<GpuResult> BuildResults(
+        HashSet<(uint low, int high)> hasDelta,
+        Dictionary<(uint low, int high), float> maxByGpu,
+        IReadOnlyDictionary<(uint low, int high), GpuDxgkAdapter>? map)
+    {
+        var results = new List<GpuResult>();
+        if (map is null) return results;
+        foreach (var key in hasDelta)
+        {
+            if (!map.TryGetValue(key, out var adapter)) continue;
+            float usage = maxByGpu.TryGetValue(key, out float u) ? u : 0f;
+            if (float.IsNaN(usage) || usage < 0) usage = 0f;
+            results.Add(new GpuResult(
+                adapter.Name,
+                Math.Min(usage, 100),
+                -1,
+                adapter.MemoryUsedMB,
+                adapter.MemoryTotalMB,
+                "PDH",
+                adapter.Kind));
+        }
+        return results;
+    }
+
+    /// <summary>从实例名解析 LUID。格式: ..._luid_0x&lt;high&gt;_0x&lt;low&gt;_...</summary>
     private static (uint low, int high) ParseLuid(string instanceName)
     {
         // 格式: pid_0_luid_0x00000000_0x00013AB9_phys_0_eng_0_engtype_3D
@@ -138,8 +205,6 @@ internal sealed class PdhGpuReader
         {
             if (parts[i] == "luid" && i + 2 < parts.Length)
             {
-                // parts[i+1] = "0x<high>", parts[i+2] = "0x<low>"
-                // 注意: 实际格式是 luid_0x<high>_0x<low>
                 if (parts[i + 1].StartsWith("0x") && parts[i + 2].StartsWith("0x"))
                 {
                     int high = ParseHex(parts[i + 1]);

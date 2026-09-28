@@ -29,8 +29,8 @@ public partial class SysMonCommandsProvider : CommandProvider
         Icon = new IconInfo(SysMonIcons.App);
         Frozen = false;
 
-        // M11: PrecisionMode 设置已移除 — 传感器回退链自动选择最优数据源
-        // (Broker → HWiNFO → ThermalZone)，无需用户手动切换。
+        // M11: PrecisionMode 设置已移除 — 传感器回退链自动选择最优数据源（分型，见 §3 约束 1）:
+        // GPU=Broker → HWiNFO → D3DKMT → PDH；CPU温度=Broker → HWiNFO → ThermalZone。无需用户手动切换。
         _settingsManager = new SysMonSettingsManager();
         Settings = _settingsManager;
 

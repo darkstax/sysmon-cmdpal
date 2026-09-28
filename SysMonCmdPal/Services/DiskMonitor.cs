@@ -14,7 +14,7 @@ namespace SysMonCmdPal;
 /// PerformanceCounter 按驱动器惰性创建并复用。
 /// 物理磁盘通过 WMI Win32_DiskDrive 查询，关联逻辑分区。
 /// </summary>
-internal sealed class DiskMonitor
+internal sealed class DiskMonitor : ISystemInfoSource
 {
     private readonly Dictionary<string, (PerformanceCounter? Read, PerformanceCounter? Write)> _diskIOCounters = new();
     private readonly object _diskIOLock = new();
@@ -23,6 +23,19 @@ internal sealed class DiskMonitor
     private PhysicalDiskInfo[]? _cachedPhysicalDisks;
     private DateTime _physDiskCacheTime = DateTime.MinValue;
     private static readonly TimeSpan PhysDiskCacheTtl = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// T1-1: 作为采集源接入 SystemInfoService 注册表。等价于原 Refresh() 中
+    /// 「Disks = Read() → PhysicalDisks = ReadPhysicalDisks(Disks)」两步
+    /// （含 ReadPhysicalDisks 外层 try/catch → [] 的回退语义）。
+    /// </summary>
+    public void ReadInto(ref SystemSnapshot snapshot)
+    {
+        snapshot.Disks = Read();
+        // 物理磁盘查询（WMI，稍重）— 复用已读的逻辑分区数据
+        try { snapshot.PhysicalDisks = ReadPhysicalDisks(snapshot.Disks); }
+        catch (Exception ex) { Debug.WriteLine($"[SysMon] ReadPhysicalDisks: {ex.Message}"); snapshot.PhysicalDisks = []; }
+    }
 
     public DiskInfo[] Read()
     {

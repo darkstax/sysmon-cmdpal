@@ -1,5 +1,5 @@
 // Copyright (c) 2026 SysMonCmdPal
-// 主页面 — 系统概览列表（CPU / 内存 / 磁盘 / GPU / 网络 / 电池）
+// 主页面 — 系统概览列表（CPU / 内存 / 磁盘 / GPU / 网络 / 电池 / 传感器 / Broker 诊断）
 
 using System.Diagnostics;
 using System.Linq;
@@ -12,33 +12,104 @@ namespace SysMonCmdPal;
 /// <summary>
 /// Command Palette 中打开的主页面。
 /// 以列表形式展示各子系统，选中后进入详情页。
+///
+/// T1-2（路线图 §5 Phase1 / P0-2）：构造函数不再 new 8 个详情页 —— 只创建轻量惰性壳
+/// (DeferredListPage / DeferredContentPage)。真实详情页在用户首次进入该页（宿主读取
+/// 页内容 / 列表 / 上下文命令）时才创建并此后复用同一实例；Dispose 只释放已创建的实例，
+/// 未创建的永不触发。BatteryReportService 等后台工作只在内层电池页真正打开时启动。
+/// 新增 ListItem 的 Icon/Title/Subtitle 逻辑保持与重构前完全一致；本地化仍走 Loc.Get。
 /// </summary>
 internal sealed partial class SysMonMainPage : ListPage, IDisposable
 {
-    private readonly SystemInfoService _sysInfo = SystemInfoService.Instance;
+    /// <summary>
+    /// 详情页工厂（T1-2 测试缝隙）：默认实现 new 真实详情页；
+    /// 单元测试注入计次工厂，断言「未进入详情页 → 零实例化」「重复进入 → 复用同一实例」
+    /// 「Dispose 未创建页 → 不反向触发创建」。
+    /// </summary>
+    internal sealed record DetailPageFactories(
+        Func<ContentPage> Cpu,
+        Func<ContentPage> Memory,
+        Func<ListPage> Disk,
+        Func<ContentPage> Network,
+        Func<ContentPage> Battery,
+        Func<ListPage> Gpu,
+        Func<ListPage> Sensors,
+        Func<ContentPage> Diagnostics)
+    {
+        public static DetailPageFactories Default { get; } = new(
+            static () => new CpuDetailPage(),
+            static () => new MemoryDetailPage(),
+            static () => new DiskDetailPage(),
+            static () => new NetworkDetailPage(),
+            static () => new BatteryDetailPage(),
+            static () => new GpuDetailPage(),
+            static () => new SensorListPage(),
+            static () => new BrokerDiagnosticsPage());
+    }
 
-    // 缓存详情页实例 — 避免每次 GetItems() 创建新实例导致 timer 泄漏和页面不可复用
-    private readonly CpuDetailPage _cpuPage = new();
-    private readonly MemoryDetailPage _memPage = new();
-    private readonly DiskDetailPage _diskPage = new();
-    private readonly NetworkDetailPage _netPage = new();
-    private readonly BatteryDetailPage _batPage = new();
-    private readonly GpuDetailPage _gpuPage = new();
-    private readonly SensorListPage _sensorPage = new();
-    private readonly BrokerDiagnosticsPage _brokerDiagnosticsPage = new();
+    private readonly SystemInfoService _sysInfo;
+
+    // 惰性壳的 name/title/icon 必须与对应详情页 ctor 中的赋值逐字一致：
+    // 宿主在进入页面之前就会读取页头 (Icon/Name/Title)，壳必须自带正确镜像值。
+    // 【改任一详情页 ctor 的这三项时，必须同步修改这里】
+    private readonly DeferredContentPage _cpuPage;
+    private readonly DeferredContentPage _memPage;
+    private readonly DeferredListPage _diskPage;
+    private readonly DeferredContentPage _netPage;
+    private readonly DeferredContentPage _batPage;
+    private readonly DeferredListPage _gpuPage;
+    private readonly DeferredListPage _sensorPage;
+    private readonly DeferredContentPage _brokerDiagnosticsPage;
     private readonly BtopLauncherCommand _btopCmd = new();
 
     public SysMonMainPage()
+        : this(DetailPageFactories.Default, SystemInfoService.Instance)
     {
+    }
+
+    /// <summary>T1-2 测试构造：注入详情页工厂与采集服务，断言可在零硬件依赖下完成。</summary>
+    internal SysMonMainPage(DetailPageFactories factories, SystemInfoService sysInfo)
+    {
+        _sysInfo = sysInfo;
+
         Icon = new IconInfo(SysMonIcons.App);
         Title = Loc.Get("MainPage.Title");
         Name = "Open";
-        // P2: 不再需要 preWarmTimer — 详情页在 GetContent() 时自动订阅 DockBandRefreshCoordinator
+
+        _cpuPage = new DeferredContentPage(factories.Cpu,
+            name: "CPU", title: Loc.Get("Cpu.PageTitle"), icon: SysMonIcons.Cpu);
+        _memPage = new DeferredContentPage(factories.Memory,
+            name: Loc.Get("Dock.Memory"), title: Loc.Get("Memory.PageTitle"), icon: SysMonIcons.Memory);
+        _diskPage = new DeferredListPage(factories.Disk,
+            name: Loc.Get("Dock.Disk"), title: Loc.Get("Disk.PageTitle"), icon: SysMonIcons.Disk);
+        _netPage = new DeferredContentPage(factories.Network,
+            name: Loc.Get("MainPage.NetworkTitle"), title: Loc.Get("Network.PageTitle"), icon: SysMonIcons.Network);
+        _batPage = new DeferredContentPage(factories.Battery,
+            name: Loc.Get("Dock.Battery"), title: Loc.Get("Battery.PageTitle"), icon: SysMonIcons.Battery);
+        _gpuPage = new DeferredListPage(factories.Gpu,
+            name: "GPU", title: Loc.Get("Gpu.PageTitle"), icon: SysMonIcons.Gpu);
+        _sensorPage = new DeferredListPage(factories.Sensors,
+            name: "Sensors", title: Loc.Get("Sensor.PageTitle"), icon: SysMonIcons.Sensors);
+        _brokerDiagnosticsPage = new DeferredContentPage(factories.Diagnostics,
+            name: "BrokerDiagnostics", title: Loc.Get("BrokerDiagnostics.PageTitle"), icon: SysMonIcons.Diagnostics);
+        // P2: 不需要 preWarmTimer —— 内层详情页在 GetContent()/GetItems() 时才
+        // 自动订阅 DockBandRefreshCoordinator；构造函数零订阅、零后台工作。
     }
+
+    // ---- T1-2 测试缝隙：暴露惰性壳本体（只读引用壳，绝不触发创建） ----
+    internal DeferredContentPage CpuShellForTest => _cpuPage;
+    internal DeferredContentPage MemoryShellForTest => _memPage;
+    internal DeferredListPage DiskShellForTest => _diskPage;
+    internal DeferredContentPage NetworkShellForTest => _netPage;
+    internal DeferredContentPage BatteryShellForTest => _batPage;
+    internal DeferredListPage GpuShellForTest => _gpuPage;
+    internal DeferredListPage SensorShellForTest => _sensorPage;
+    internal DeferredContentPage DiagnosticsShellForTest => _brokerDiagnosticsPage;
 
     public override IListItem[] GetItems()
     {
-        // 用已缓存快照，不触发同步 Refresh（避免阻塞 UI）
+        // 用已缓存快照，不触发同步 Refresh（避免阻塞 UI）；
+        // 只读取壳的镜像元数据，不创建任何详情页实例（T1-2 验收 1）。
         var info = _sysInfo.Current;
 
         return [
@@ -199,6 +270,10 @@ internal sealed partial class SysMonMainPage : ListPage, IDisposable
         return string.Join(" · ", info.Disks.Select(d => $"{d.Name} {d.UsedPercent:F0}%"));
     }
 
+    /// <summary>
+    /// 释放所有已创建的详情页实例；从未进入过的页面（Lazy 未创建）不触发实例化。
+    /// 改造前 Dispose 覆盖 7 页且漏了 BrokerDiagnosticsPage，现在 8 个壳全部覆盖。
+    /// </summary>
     public void Dispose()
     {
         _cpuPage.Dispose();
@@ -208,5 +283,6 @@ internal sealed partial class SysMonMainPage : ListPage, IDisposable
         _batPage.Dispose();
         _gpuPage.Dispose();
         _sensorPage.Dispose();
+        _brokerDiagnosticsPage.Dispose();
     }
 }

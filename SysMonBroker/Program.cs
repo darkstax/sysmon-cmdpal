@@ -87,6 +87,9 @@ internal static class Program
             int cycle = 0;
             int lastGpuCount = -1;
             int consecutiveErrors = 0;
+            // P0-3 异常分类：写路径异常独立计数，不并入采集错误的
+            // MaxConsecutiveCycleErrors=30 自杀统计（见 shm.Write 处注释）。
+            int consecutiveWriteErrors = 0;
 
             while (!cts.Token.IsCancellationRequested)
             {
@@ -95,7 +98,28 @@ internal static class Program
                 {
                     var (cpuTemp, cpuSource, gpus, sensors) = collector.ReadAll();
 
-                    shm.Write(cpuTemp, cpuSource, gpus, sensors);
+                    // P0-3 异常分类：写路径与采集路径分开统计。shm.Write 的普通异常
+                    // （非 conflict）由 BrokerSharedMemory 下一周期入口的 rebase 自愈
+                    // 消化，不得计入 consecutiveErrors/MaxConsecutiveCycleErrors=30
+                    // 自杀统计；BrokerWriterConflictException 原样上抛给外层 catch，
+                    // 真双写者的 FATAL 退出码 2 防线不削弱。持续发布失败时本行下方
+                    // 的心跳不刷新，由看门狗（CycleTimeout=20s）兜底重启。
+                    try
+                    {
+                        shm.Write(cpuTemp, cpuSource, gpus, sensors);
+                    }
+                    catch (Exception writeEx) when (writeEx is not BrokerWriterConflictException
+                                                        and not OperationCanceledException)
+                    {
+                        consecutiveWriteErrors++;
+                        if (consecutiveWriteErrors == 1 || consecutiveWriteErrors % 10 == 0)
+                            Log($"SHM write error ({consecutiveWriteErrors} consecutive; " +
+                                $"rebasing next cycle): {writeEx.Message}");
+                        Thread.Sleep(2000);
+                        continue;
+                    }
+
+                    consecutiveWriteErrors = 0;
                     Interlocked.Exchange(ref s_lastCycleTimestamp, Stopwatch.GetTimestamp());
 
                     // 周期成功：清零连续错误计数（R06）

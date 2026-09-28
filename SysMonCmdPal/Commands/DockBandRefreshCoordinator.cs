@@ -37,6 +37,15 @@ internal static class DockBandRefreshCoordinator
         }
     }
 
+    /// <summary>
+    /// T1-2 测试缝隙：当前订阅数（= 存活页面/Dock Band 数）。
+    /// 用于断言“未打开的详情页零订阅”“Dispose 后订阅数归零”，无运行时行为影响。
+    /// </summary>
+    internal static int SubscriberCount
+    {
+        get { lock (_lock) return _subscribers.Count; }
+    }
+
     public static void Unsubscribe(Action refresh)
     {
         lock (_lock)

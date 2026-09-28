@@ -12,8 +12,10 @@
 
 ```powershell
 # 构建 + 测试(Windows 工具链;纯 dotnet test 会缺 VS AppxPackage 任务)
-& $msbuild SysMonCmdPal.Tests/SysMonCmdPal.Tests.csproj /t:Build /p:Configuration=Debug /p:Platform=x64 /restore
+& $msbuild SysMonCmdPal.Tests/SysMonCmdPal.Tests.csproj /t:Build /p:Configuration=Debug /p:Platform=x64 /restore /p:GenerateAppxPackageOnBuild=false
 & $vstest SysMonCmdPal.Tests/bin/x64/Debug/net10.0-windows10.0.26100.0/SysMonCmdPal.Tests.dll
+# 只构建 Tests 项目且带 GenerateAppxPackageOnBuild=false;单独构建主项目会让 MSIX 打包消费 app dll,
+# 致测试项目 MSB3030 + vstest 数百条假 FileNotFoundException。还原受限则加本地离线源(见 AGENTS.md §4)。
 
 # Broker Dev 构建 + 运行时开关(仅本地联调, release 构建不带 Dev 元数据)
 dotnet build SysMonBroker -p:Dev=true
@@ -22,7 +24,8 @@ SysMonBroker.exe --devmode-on   # 需项目目录下有 .devmode_marker
 
 ## 关键约束
 
-- 传感器回退链不可破坏:Broker SHM → HWiNFO → D3DKMT → PDH → ThermalZone(全自动)。
+- 传感器回退链不可破坏(分型): GPU=Broker SHM→HWiNFO→D3DKMT→PDH(ThermalZone 不得进入 GPU 链)；CPU温度=Broker SHM→HWiNFO→ThermalZone(全自动)。**GPU 用户态四层 adapter 统一取自唯一出口 `GpuDxgkrnlAdapters`(gdi32+SetupDi,零 COM/零 WMI)**。
+- 出货裁剪与 COM:self-contained/RID 布局置 `BuiltInComInterop.IsSupported=false`(分界非 Debug/Release),禁 WMI/DXGI 等 built-in COM;**测试项目无 RID 故单测全绿证实/证伪不了该路径**(结构性盲区),涉 COM/WMI/DXGI 改动须隔离 publish + 交互实跑验证(详见 docs/TECHNICAL_ROADMAP.md §7)。
 - 统一 `DockBandRefreshCoordinator` 1s 刷新,禁止页面级独立定时器。
 - SHM v2 布局 / 管道协议(btop4win-broker-ipc.md)/ resw 资源 / 测试须同步修改。
 - 用户可见文案走 `Strings/{en-US,zh-CN}/Resources.resw`,禁止硬编码。
@@ -30,5 +33,5 @@ SysMonBroker.exe --devmode-on   # 需项目目录下有 .devmode_marker
 
 ## 开发约定
 
-- 中文提交信息(feat/fix/chore/docs/test 前缀);提交前跑 300 个 xUnit 用例。
+- 中文提交信息(feat/fix/chore/docs/test 前缀);提交前跑全量 xUnit,合入口径 = vstest 实测 **0 failed / 0 skipped**(用例数随任务漂移;v1.7.0 里程碑实测 436,勿硬记数字)。
 - 产物放 `release/sysmon-cmdpal/<target>/`,最多 3 个历史版本。

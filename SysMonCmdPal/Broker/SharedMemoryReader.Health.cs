@@ -7,11 +7,30 @@ namespace SysMonCmdPal.Broker;
 
 public sealed partial class SharedMemoryReader
 {
+    // ---- T2-4：四个阈值的真实关系（本注释纠正原误推导）----
+    //  * StallTimeout ≡ BrokerSensorSnapshot.AvailabilityTimeout = 5s。它**不是独立常量**，
+    //    同一个数同时承担「快照新鲜度过期」与「单次 raw stall 观察」两件事；
+    //    写断言时不得把这两条机制混成一条证据（见本文件下方三处显式分离的注释）。
+    //  * PollIntervalMilliseconds = 1s（SharedMemoryReader.cs）——这是**观察频率**，不是等待时长。
+    //    原路线图把 5s 当观察间隔、据此推出「连续 3 次 ≈ ≥15s 容忍窗口」是错的：
+    //    计数式去抖的实际确认耗时 ≈ StallTimeout + (threshold − 1) × 1s，
+    //    即阈值 2→3 只把确认从 6s 推到 7s —— 仅多 1s，达不到「8s 档不误判」。
+    //  * Broker 声明的合法静默上界 ≈ 15s（SysMonBroker/Program.cs:30-34 推导：
+    //    单硬件更新超时 8s + 慢主板更新 ≈5s + 2s 周期），计数式的 7s 落在该上界之内 ⇒ 高负载误杀。
+    //  * ConfirmStallWindow = 15s：本任务改用的**时间基**确认窗口，与上述合法上界对齐，
+    //    且仍低于 Broker 自身 CycleTimeout=20s（再晚就与 Broker 看门狗重启撞车，失去意义）。
+    //
+    // 【本修复的实际收益边界（诚实声明，勿夸大）】不改变用户可见的降级时机——那由 5s
+    // AvailabilityTimeout 新鲜度网支配（ConfirmStallWindow>5s 治不到它）；消除的是**确认链的
+    // 提前动作**：传统无 extension 路径上因瞬时慢周期而提前 MarkUnavailable + Disconnect
+    // （及其附带的「重连退避 + 首帧 baseline 不可用」窗口）。现代路径本就不 Disconnect
+    // （确认链仅在 !HasExtension 时断开），该语义保持不变、不扩大。
     private static readonly TimeSpan StallTimeout = BrokerSensorSnapshot.AvailabilityTimeout;
 
-    // stall 去抖：Broker 单周期最长可达 8s（硬件超时），StallTimeout 仅 5s，
-    // 连续 StallDebounceThreshold 次检测到 stall 才 MarkUnavailable/Disconnect。
-    private const int StallDebounceThreshold = 2;
+    // 确认链阈值：自上次 counter 前进起持续静默 ≥ 此窗口才认定「真停滞」。必须有界——
+    // 窗口耗尽即确认，不得无限容忍慢周期。取代原计数式 StallDebounceThreshold（零测试覆盖，
+    // 且如上所述只多 1s，无法覆盖合法静默上界）。
+    private static readonly TimeSpan ConfirmStallWindow = TimeSpan.FromSeconds(15);
 
     private int? _lastCounter;
     private long _lastBrokerTimestampTicks;
@@ -23,8 +42,6 @@ public sealed partial class SharedMemoryReader
     private bool _awaitingCounterAdvance;
     private int _restartBaselineCounter;
 
-    // 仅由 reader 线程访问：连续 stall 观察次数（恢复后清零）。
-    private int _consecutiveStalls;
     // 上次计 restartDelta 时的 instanceId（无 extension 时为 0），用于按实例去重。
     private ulong? _lastRestartCountedInstanceId;
 
@@ -122,7 +139,7 @@ public sealed partial class SharedMemoryReader
             if (counter == _restartBaselineCounter)
             {
                 bool stalled = IsStalled();
-                bool stallConfirmed = RecordStallObservation(stalled);
+                bool stallConfirmed = IsStallConfirmed();
                 ReportWaitingForCommit(
                     snapshot,
                     brokerTimestampUtc,
@@ -144,14 +161,15 @@ public sealed partial class SharedMemoryReader
 
         if (snapshot.HasExtension && IsBrokerPublishStalled(snapshot.MonotonicPublishMs))
         {
-            // 去抖：连续 StallDebounceThreshold 次 publish 超时才 MarkUnavailable，
-            // 容忍 Broker 单周期可达 8s（StallTimeout 仅 5s）的硬件超时。
-            bool stallConfirmed = RecordStallObservation(true);
+            // 【即时降级 —— 刻意旁路 ConfirmStallWindow，勿改成去抖】
+            // 判据依据是 Broker 自己写下的 publish 时刻已超过 StallTimeout 未刷新：这是**既成事实**
+            // （新鲜度已过期），不属于「counter 暂未推进、下一次可能推进」的瞬时抖动，容忍它没有意义。
+            // 因此本分支直接确认，不进时间窗；ExtendedSnapshot_WithExpiredPublishTimeIsImmediately...
+            // 用例即为此语义的门禁（名字与期望值都不得弱化）。
             if (_lastCounter != counter || _lastInstanceId != snapshot.InstanceId)
                 ObserveBaseline(snapshot);
 
-            if (stallConfirmed)
-                BrokerPushReceiver.Instance.MarkUnavailable();
+            BrokerPushReceiver.Instance.MarkUnavailable();
             UpdateDiagnostics(
                 connected: true,
                 protocolValid: true,
@@ -173,7 +191,7 @@ public sealed partial class SharedMemoryReader
         if (!skipPreviousCounterComparison && _lastCounter == counter)
         {
             bool stalled = IsStalled();
-            bool stallConfirmed = RecordStallObservation(stalled);
+            bool stallConfirmed = IsStallConfirmed();
             string mapName = _connectedMapName;
             if (stallConfirmed && !snapshot.HasExtension)
             {
@@ -240,8 +258,8 @@ public sealed partial class SharedMemoryReader
         _hasObservedSnapshot = true;
         _hasPublishedSnapshot = true;
         _lastObservedMapName = _connectedMapName;
-        // 成功发布即恢复，stall 去抖计数清零。
-        _consecutiveStalls = 0;
+        // 成功发布即恢复：上方 _lastCounterAdvanceTimestamp 的刷新已把确认窗口重新起算，
+        // 时间基确认链无需再单独清零计数（原计数式实现才需要这一步）。
 
         UpdateDiagnostics(
             connected: true,
@@ -304,19 +322,28 @@ public sealed partial class SharedMemoryReader
         Stopwatch.GetElapsedTime(_lastCounterAdvanceTimestamp) >= StallTimeout;
 
     /// <summary>
-    /// 记录一次 stall 观察：连续 StallDebounceThreshold 次才确认（返回 true）；
-    /// 观察到非 stall（恢复）时计数清零。仅由 reader 线程调用。
+    /// 确认链（时间基，与 raw 观察面 <see cref="IsStalled"/> 分离）：自上次 counter 前进起
+    /// 持续静默 ≥ <see cref="ConfirmStallWindow"/> 才认定「真停滞」。
+    ///
+    /// 三条判据不得混淆：
+    ///   1) <see cref="IsStalled"/>：5s 的**单次 raw 观察**（写进 Diagnostics.IsStalled）；
+    ///   2) 本方法：**确认链**（15s 窗口），决定是否 MarkUnavailable/Disconnect；
+    ///   3) BrokerSensorSnapshot.IsUsable：**新鲜度网**（同为 5s，但语义独立），
+    ///      仅按 LastAvailableTimestamp 判定，与确认链无关。
+    /// 断言时一条只代表一条机制，否则会把新鲜度自然过期「蹭看」成确认链效果。
+    ///
+    /// _lastCounterAdvanceTimestamp == 0 是「刚重启/刚重连，窗口从下一次前进重新计」的哨兵，
+    /// 此时一律不确认（与原实现 IsStalled() 的短路语义一致，重启检测/reset 行为不变）。
+    /// 窗口**有界**：耗尽即返回 true，不存在无限容忍。
     /// </summary>
-    private bool RecordStallObservation(bool stalled)
+    private bool IsStallConfirmed()
     {
-        if (!stalled)
-        {
-            _consecutiveStalls = 0;
+        if (_lastCounterAdvanceTimestamp <= 0)
             return false;
-        }
 
-        _consecutiveStalls++;
-        return _consecutiveStalls >= StallDebounceThreshold;
+        // ConfirmStallWindow(15s) > StallTimeout(5s)，故窗口耗尽必然已满足 raw stall 观察；
+        // 确认链是观察面的**超集**，不会在观察尚未成立时提前确认。
+        return Stopwatch.GetElapsedTime(_lastCounterAdvanceTimestamp) >= ConfirmStallWindow;
     }
 
     private static bool IsBrokerPublishStalled(long monotonicPublishMs)

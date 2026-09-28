@@ -199,7 +199,7 @@ internal sealed partial class GpuItemPage : RefreshingContentPage
         _usageChart = new SparklineChart(maxPoints: 34, metric: ChartMetric.Gpu);
         _memChart = new SparklineChart(maxPoints: 34, metric: ChartMetric.GpuMemory);
 
-        Icon = new IconInfo(GpuClassifier.GetIcon(gpu));
+        Icon = new IconInfo(GpuIdentityService.GetIcon(gpu));
         Title = string.IsNullOrEmpty(gpu.Name) ? $"GPU {index + 1}" : gpu.Name;
         Name = Title;
         Commands =

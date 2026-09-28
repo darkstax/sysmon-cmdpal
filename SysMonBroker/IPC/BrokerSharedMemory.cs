@@ -11,6 +11,12 @@
 //   Extended reader: reads the commit sequence before/after copying; odd or
 //   changed values mean the snapshot was in flight and must be retried.
 //
+// P0-3 self-heal: Write() no longer rolls state back inside its catch (a rollback
+// that itself threw left fields and SHM permanently desynchronised). It only marks
+// the cycle corrupted; the next cycle rebase-rewrites its fields from the mapped
+// view before validating writer ownership, and refuses to touch the map at all when
+// the extension identity belongs to another broker instance.
+//
 // ACL: D:P(A;;GR;;;BU)(A;;GA;;;BA)(A;;GA;;;SY) — Users read, Admins/System full control
 // SensorEntry.HardwareTag packs hardware type in the low byte and same-type
 // instance index in the upper bits, so multiple GPUs of the same vendor stay distinct.
@@ -105,6 +111,7 @@ public sealed class BrokerSharedMemory : IDisposable
     private int _commitSequence;
     private long _lastUtcTimestamp;
     private long _lastMonotonicPublishMs;
+    private bool _writeCorrupted;
     private bool _disposed;
 
     public ulong InstanceId { get; } = CreateInstanceId();
@@ -364,17 +371,17 @@ public sealed class BrokerSharedMemory : IDisposable
 
         byte* p = (byte*)_pView;
 
-        EnsureWriterOwnership(p);
+        // P0-3 自愈入口：上一周期 Write() 中途抛异常（catch 只置标记、不回滚）后，
+        // 本周期先做「读回 SHM 重建自身字段」的真 rebase，再走 EnsureWriterOwnership。
+        // 顺序不可颠倒：BeginCommit 先置 odd、随后即推进 _counter/_lastUtcTimestamp/
+        // _lastMonotonicPublishMs，而 SHM 的 OffCounter 要到 CompleteCommit、
+        // OffMonotonicPublishMs 要到 WriteExtension 才落盘；
+        // 带着这种失配直接跑校验会误报 BrokerWriterConflictException → 进程自杀。
+        // rebase 内部自带身份守卫，外部接管者一律放行到冲突判定，故放在校验前是安全的。
+        if (_writeCorrupted)
+            RebaseAfterCorruption(p);
 
-        // R12: _counter/_lastMonotonicPublishMs/_commitSequence 在 BeginCommit 与
-        // CompleteCommit 之间推进；若其间抛异常（OOM/ThreadAbort），字段会与 SHM
-        // 永久失配，下一周期 EnsureWriterOwnership 校验失败并误报
-        // BrokerWriterConflictException。此处保存旧值，异常时回滚字段与 SHM 提交
-        // 序列（撤销 BeginCommit 写下的 odd 标记），保证下一周期自愈。
-        int savedCounter = _counter;
-        long savedUtcTimestamp = _lastUtcTimestamp;
-        long savedMonotonicPublishMs = _lastMonotonicPublishMs;
-        int savedCommitSequence = _commitSequence;
+        EnsureWriterOwnership(p);
 
         try
         {
@@ -422,13 +429,11 @@ public sealed class BrokerSharedMemory : IDisposable
         }
         catch
         {
-            // 回滚字段与 SHM 提交序列，恢复到 Write() 入口时的一致状态
-            // （even 提交值），下一周期 BeginCommit 的 (seq & ~1) + 1 正常推进。
-            _counter = savedCounter;
-            _lastUtcTimestamp = savedUtcTimestamp;
-            _lastMonotonicPublishMs = savedMonotonicPublishMs;
-            _commitSequence = savedCommitSequence;
-            Volatile.Write(ref *(int*)(p + OffCommitSequence), savedCommitSequence);
+            // P0-3：只标记「本实例上一次提交未完成」，随后原样 rethrow。
+            // 绝不在 catch 里回滚字段或写 SHM —— 回滚自身二次抛出（OOM / 视图不可写）
+            // 会留下「字段已回滚、SHM 序列停在 odd」的永久失配，反而制造下一周期误杀。
+            // 状态恢复统一延后到下一周期入口的 RebaseAfterCorruption。
+            _writeCorrupted = true;
             throw;
         }
 
@@ -436,6 +441,47 @@ public sealed class BrokerSharedMemory : IDisposable
         // （否则 Program.cs 心跳不更新 → 看门狗误杀，审计 B-F2）。
         try { _event?.Set(); }
         catch { }
+    }
+
+    /// <summary>
+    /// P0-3 自愈：把 in-memory 字段重新对齐到 SHM 现状（与 InitializeHeader 同构的
+    /// 「先读回、再以读回值重建自身状态」语义）。
+    ///
+    /// 恢复动作不是一次数据提交：<c>_counter</c> 取 SHM 现值、绝不推进（同
+    /// InitializeHeader 保留 previousCounter 的理由）——否则读端会把尚未写完的
+    /// payload 当成新快照发布，破坏新鲜度/回退链语义。
+    ///
+    /// 身份守卫：仅当 extension magic 完好且 <c>OffInstanceId</c> 仍是我方实例时才
+    /// rebase。否则说明 map 已被真实接管者持有，本方法一个字节都不写，交由
+    /// <see cref="EnsureWriterOwnership"/> 照常抛 <see cref="BrokerWriterConflictException"/>；
+    /// Program.cs 的 FATAL 退出 + 计划任务重启是真双写者场景的正确最后防线。
+    /// </summary>
+    private unsafe void RebaseAfterCorruption(byte* p)
+    {
+        if (Volatile.Read(ref *(int*)(p + OffExtensionMagic)) != ExtensionMagicValue)
+            return;
+
+        if (Volatile.Read(ref *(ulong*)(p + OffInstanceId)) != InstanceId)
+            return;
+
+        int shmCounter = Volatile.Read(ref *(int*)(p + OffCounter));
+        long shmTimestamp = Volatile.Read(ref *(long*)(p + OffTimestamp));
+        long shmMonotonicPublishMs = Volatile.Read(ref *(long*)(p + OffMonotonicPublishMs));
+        int shmCommitSequence = Volatile.Read(ref *(int*)(p + OffCommitSequence));
+
+        _counter = shmCounter;
+        _lastUtcTimestamp = shmTimestamp;
+        _lastMonotonicPublishMs = shmMonotonicPublishMs;
+
+        // 撤销上次 BeginCommit 留下的 odd 标记（偶化 = 「当前无在途提交」）。
+        // 奇偶/提交语义不变（硬约束 3）：本周期的 BeginCommit 会重新置 odd，
+        // CompleteCommit 再转 even，读端仍按「odd/变化即重试」消费。
+        int evenSequence = shmCommitSequence & ~1;
+        _commitSequence = evenSequence;
+        Volatile.Write(ref *(int*)(p + OffCommitSequence), evenSequence);
+        Thread.MemoryBarrier();
+
+        _writeCorrupted = false;
     }
 
     private unsafe void EnsureWriterOwnership(byte* p)

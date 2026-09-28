@@ -192,10 +192,13 @@ public sealed partial class SharedMemoryReader : IDisposable
             return;
         }
 
+        // 三条判据分离（阈值真实关系见 SharedMemoryReader.Health.cs 头部注释）：
+        //   stalled        = 5s 单次 raw 观察（只写进 Diagnostics.IsStalled，阈值不变）；
+        //   stallConfirmed = 15s 时间基确认窗口（T2-4），决定是否 MarkUnavailable/Disconnect。
+        // 原计数式去抖（连续 N 次观察）已废弃：轮询间隔是 1s 而非 5s，阈值 2→3 只把确认
+        // 从 6s 推到 7s，覆盖不到 Broker 合法静默上界 ≈15s，高负载下仍会提前断连。
         bool stalled = IsStalled();
-        // stall 去抖：连续 StallDebounceThreshold 次检测到 stall 才断连，
-        // 容忍 Broker 单周期最长可达 8s（StallTimeout 仅 5s）的硬件超时。
-        bool stallConfirmed = RecordStallObservation(stalled);
+        bool stallConfirmed = IsStallConfirmed();
         if (status != StableReadStatus.Unstable || stallConfirmed)
             BrokerPushReceiver.Instance.MarkUnavailable();
 

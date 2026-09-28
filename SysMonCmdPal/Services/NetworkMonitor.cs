@@ -11,7 +11,7 @@ namespace SysMonCmdPal;
 /// <summary>
 /// 网络速度采集器。按物理接口独立计算 delta，EMA 平滑，排除虚拟/隧道/蓝牙接口。
 /// </summary>
-internal sealed class NetworkMonitor
+internal sealed class NetworkMonitor : ISystemInfoSource
 {
     private static readonly string[] ExcludedDescriptionTokens =
     [
@@ -61,6 +61,17 @@ internal sealed class NetworkMonitor
         "SysMonCmdPal", "net_debug.log");
 
     private static readonly bool _netLogEnabled = IsNetLogEnabled();
+
+    /// <summary>
+    /// T1-1: 作为采集源接入 SystemInfoService 注册表。原 Refresh() 里
+    /// 「取时间戳 → ReadSpeed → 写 NetDown/NetUp」三步语义完全保留。
+    /// </summary>
+    public void ReadInto(ref SystemSnapshot snapshot)
+    {
+        var (down, up) = ReadSpeed(DateTime.UtcNow);
+        snapshot.NetDown = down;
+        snapshot.NetUp = up;
+    }
 
     /// <summary>首次/重置时：枚举所有物理接口，记录基线字节数</summary>
     public void Seed()
