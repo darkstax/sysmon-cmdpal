@@ -45,6 +45,15 @@ public sealed partial class SharedMemoryReader
     // 上次计 restartDelta 时的 instanceId（无 extension 时为 0），用于按实例去重。
     private ulong? _lastRestartCountedInstanceId;
 
+    // 稳态决策核（纯决策，状态留在上方字段）。
+    // ⚠ 必须**惰性创建**，不能用字段初始化器：测试 harness 经
+    // RuntimeHelpers.GetUninitializedObject 构造 reader（绕过构造函数与字段初始化器），
+    // 字段初始化器在那条路径下不会执行 ⇒ 直接读会拿到 null 并抛 NullReferenceException。
+    private SnapshotStabilityTracker? _stabilityTracker;
+
+    private SnapshotStabilityTracker _stability =>
+        _stabilityTracker ??= new SnapshotStabilityTracker(StallTimeout, ConfirmStallWindow);
+
     private static readonly object s_diagnosticsLock = new();
     private static SharedMemoryReaderDiagnostics s_diagnostics = new();
 
@@ -53,206 +62,163 @@ public sealed partial class SharedMemoryReader
         get { lock (s_diagnosticsLock) return s_diagnostics; }
     }
 
+    /// <summary>
+    /// 稳定快照的处理入口：**编排 + 副作用 dispatch**。
+    /// </summary>
+    /// <remarks>
+    /// 判定条件全集已提取到 <see cref="SnapshotStabilityTracker.Decide"/>（纯决策，无副作用）；
+    /// 本方法只负责：构造观测/状态视图 → 拿决策 → 按下发的指令执行副作用 → 上报诊断。
+    /// ⚠ 状态字段（含 <c>_lastCounterAdvanceTimestamp</c>）**必须留驻在本类**：
+    /// 测试 harness 用反射按名绑定它们（见 SharedMemoryReaderHarness），移家即六个兄弟套件连锁爆炸。
+    /// </remarks>
     private void ProcessStableSnapshot(StableSnapshot snapshot, int retryCount)
     {
-        int counter = snapshot.Counter;
-        long brokerTimestampTicks = snapshot.BrokerTimestampTicks;
-        DateTime brokerTimestampUtc = ToUtcTimestamp(brokerTimestampTicks);
-        int restartDelta = 0;
-        bool skipPreviousCounterComparison = false;
+        DateTime brokerTimestampUtc = ToUtcTimestamp(snapshot.BrokerTimestampTicks);
 
-        // 首连一律要求 counter 前进验证（双快照）后再发布：
-        // 旧版（无 extension）Broker 初始化窗口内 counter≠0 的历史假设不可靠，
-        // 直接发布可能泄漏初始化中的空数据；带 extension 的提交帧也需要
-        // 等后续 counter 前进确认该帧已稳定提交。
-        if (!_hasObservedSnapshot)
-        {
-            ObserveBaseline(snapshot);
-            _awaitingCounterAdvance = !snapshot.HasExtension;
-            _restartBaselineCounter = counter;
-            ReportWaitingForCommit(
-                snapshot,
-                brokerTimestampUtc,
-                retryCount,
-                restartDelta: 0,
-                "Broker is initialized; waiting for the first data commit");
-            return;
-        }
+        // 观测：mapChanged 在 reader 侧比较（两个字段都在本类，字符串不搬进纯决策核）
+        var observation = new StabilityObservation(
+            Counter: snapshot.Counter,
+            BrokerTimestampTicks: snapshot.BrokerTimestampTicks,
+            HasExtension: snapshot.HasExtension,
+            InstanceId: snapshot.InstanceId,
+            MonotonicPublishMs: snapshot.MonotonicPublishMs,
+            MapChanged: !string.Equals(_lastObservedMapName, _connectedMapName, StringComparison.Ordinal));
 
-        if (_hasObservedSnapshot)
-        {
-            bool mapChanged = !string.Equals(
-                _lastObservedMapName,
-                _connectedMapName,
-                StringComparison.Ordinal);
-            bool counterMovedBackwards = _lastCounter.HasValue &&
-                CounterMovedBackwards(_lastCounter.Value, counter);
-            bool instanceChanged = snapshot.HasExtension &&
-                snapshot.InstanceId != _lastInstanceId;
-            bool extensionRemoved = _lastInstanceId != 0 && !snapshot.HasExtension;
-            bool sameCounterWithNewTimestamp = !snapshot.HasExtension &&
-                _lastCounter == counter &&
-                _lastBrokerTimestampTicks != 0 &&
-                brokerTimestampTicks != 0 &&
-                brokerTimestampTicks != _lastBrokerTimestampTicks;
+        StabilityDecision decision = _stability.Decide(in observation, BuildStabilityState());
 
-            if (mapChanged ||
-                instanceChanged ||
-                extensionRemoved ||
-                counterMovedBackwards ||
-                sameCounterWithNewTimestamp)
-            {
-                // 按 instanceId 去重：仅当 instanceId 与上次计数时不同才 +1，
-                // 避免一次重启被计两次（如 extensionRemoved 后再 instanceChanged）。
-                if (_lastRestartCountedInstanceId != snapshot.InstanceId)
-                {
-                    restartDelta = 1;
-                    _lastRestartCountedInstanceId = snapshot.InstanceId;
-                }
-
-                BrokerPushReceiver.Instance.MarkUnavailable();
-                _lastCounterAdvanceTimestamp = 0;
-
-                if (snapshot.HasExtension ||
-                    extensionRemoved ||
-                    counter == 0 ||
-                    sameCounterWithNewTimestamp)
-                {
-                    ObserveBaseline(snapshot);
-                    _awaitingCounterAdvance = !snapshot.HasExtension;
-                    _restartBaselineCounter = counter;
-                    ReportWaitingForCommit(
-                        snapshot,
-                        brokerTimestampUtc,
-                        retryCount,
-                        restartDelta,
-                        "Broker restart detected; waiting for the next committed update");
-                    return;
-                }
-
-                skipPreviousCounterComparison = true;
-            }
-        }
-
-        if (_awaitingCounterAdvance)
-        {
-            if (counter == _restartBaselineCounter)
-            {
-                bool stalled = IsStalled();
-                bool stallConfirmed = IsStallConfirmed();
-                ReportWaitingForCommit(
-                    snapshot,
-                    brokerTimestampUtc,
-                    retryCount,
-                    restartDelta: 0,
-                    stalled
-                        ? $"Broker commit counter has not advanced for {StallTimeout.TotalSeconds:F0} seconds"
-                        : "Broker is initialized; waiting for the first data commit",
-                    stalled: stalled,
-                    connected: !stallConfirmed);
-                if (stallConfirmed)
-                    Disconnect();
-                return;
-            }
-
+        // 决策要求的前置副作用（顺序即语义，见 ApplyRestartAccounting 注释）
+        ApplyRestartAccounting(in decision, snapshot);
+        if (decision.ClearAwaitingCounterAdvance)
             _awaitingCounterAdvance = false;
-            skipPreviousCounterComparison = true;
-        }
 
-        if (snapshot.HasExtension && IsBrokerPublishStalled(snapshot.MonotonicPublishMs))
+        Dispatch(in decision, snapshot, retryCount, brokerTimestampUtc);
+    }
+
+    /// <summary>按决策结果执行副作用（6 个分支各一个小方法，分支体 3-10 行）。</summary>
+    private void Dispatch(
+        in StabilityDecision d, in StableSnapshot snapshot, int retryCount, DateTime brokerTimestampUtc)
+    {
+        switch (d.Kind)
         {
-            // 【即时降级 —— 刻意旁路 ConfirmStallWindow，勿改成去抖】
-            // 判据依据是 Broker 自己写下的 publish 时刻已超过 StallTimeout 未刷新：这是**既成事实**
-            // （新鲜度已过期），不属于「counter 暂未推进、下一次可能推进」的瞬时抖动，容忍它没有意义。
-            // 因此本分支直接确认，不进时间窗；ExtendedSnapshot_WithExpiredPublishTimeIsImmediately...
-            // 用例即为此语义的门禁（名字与期望值都不得弱化）。
-            if (_lastCounter != counter || _lastInstanceId != snapshot.InstanceId)
-                ObserveBaseline(snapshot);
+            case StabilityKind.FirstConnectBaseline:
+                HandleBaselineWait(in snapshot, retryCount, brokerTimestampUtc, restartDelta: 0,
+                    "Broker is initialized; waiting for the first data commit");
+                return;
+            case StabilityKind.RestartAwaitingAdvance:
+                HandleBaselineWait(in snapshot, retryCount, brokerTimestampUtc, d.RestartDelta,
+                    "Broker restart detected; waiting for the next committed update");
+                return;
+            case StabilityKind.WaitingForCounterAdvance:
+                HandleWaitingForCounterAdvance(in d, in snapshot, retryCount, brokerTimestampUtc);
+                return;
+            case StabilityKind.PublishTimeExpired:
+                HandlePublishTimeExpired(in d, in snapshot, retryCount, brokerTimestampUtc);
+                return;
+            case StabilityKind.CounterUnchanged:
+                HandleCounterUnchanged(in d, in snapshot, retryCount, brokerTimestampUtc);
+                return;
+            case StabilityKind.ReadyToPublish:
+                HandleReadyToPublish(in snapshot, retryCount, brokerTimestampUtc, d.RestartDelta);
+                return;
+        }
+    }
 
+    /// <summary>
+    /// 分支 1/2：观察 baseline + 重新起算等待窗口 + 上报等待提交。
+    /// </summary>
+    /// <remarks>
+    /// 首连一律要求 counter 前进验证（双快照）后再发布：旧版（无 extension）Broker 初始化窗口内
+    /// counter≠0 的历史假设不可靠，直接发布可能泄漏初始化中的空数据；
+    /// 带 extension 的提交帧也需要等后续 counter 前进确认该帧已稳定提交。
+    /// </remarks>
+    private void HandleBaselineWait(
+        in StableSnapshot snapshot, int retryCount, DateTime brokerTimestampUtc,
+        int restartDelta, string error)
+    {
+        ObserveBaseline(snapshot);
+        _awaitingCounterAdvance = !snapshot.HasExtension;
+        _restartBaselineCounter = snapshot.Counter;
+        ReportWaitingForCommit(snapshot, brokerTimestampUtc, retryCount, restartDelta, error);
+    }
+
+    /// <summary>分支 3：仍在等 counter 前进且 counter 未变；确认窗耗尽则断连。</summary>
+    private void HandleWaitingForCounterAdvance(
+        in StabilityDecision d, in StableSnapshot snapshot, int retryCount, DateTime brokerTimestampUtc)
+    {
+        ReportWaitingForCommit(
+            snapshot, brokerTimestampUtc, retryCount, restartDelta: 0,
+            d.Stalled
+                ? $"Broker commit counter has not advanced for {StallTimeout.TotalSeconds:F0} seconds"
+                : "Broker is initialized; waiting for the first data commit",
+            stalled: d.Stalled,
+            connected: !d.StallConfirmed);
+        if (d.StallConfirmed)
+            Disconnect();
+    }
+
+    /// <summary>
+    /// 分支 4：extension 的发布时刻过期 ⇒ 即时降级。
+    /// </summary>
+    /// <remarks>
+    /// 【即时降级 —— 刻意旁路 ConfirmStallWindow，勿改成去抖】
+    /// 判据依据是 Broker 自己写下的 publish 时刻已超过 StallTimeout 未刷新：这是**既成事实**
+    /// （新鲜度已过期），不属于「counter 暂未推进、下一次可能推进」的瞬时抖动，容忍它没有意义。
+    /// 因此本分支直接确认，不进时间窗；ExtendedSnapshot_WithExpiredPublishTimeIsImmediately...
+    /// 用例即为此语义的门禁（名字与期望值都不得弱化）。
+    /// </remarks>
+    private void HandlePublishTimeExpired(
+        in StabilityDecision d, in StableSnapshot snapshot, int retryCount, DateTime brokerTimestampUtc)
+    {
+        if (d.ObserveBaselineFirst)
+            ObserveBaseline(snapshot);
+
+        BrokerPushReceiver.Instance.MarkUnavailable();
+        Report(SnapshotDeserializer.PublishTimeExpired(
+            snapshot, _connectedMapName, brokerTimestampUtc, d.RestartDelta, retryCount, StallTimeout));
+    }
+
+    /// <summary>分支 5：counter 未前进（传统路径确认窗耗尽才断连）。</summary>
+    private void HandleCounterUnchanged(
+        in StabilityDecision d, in StableSnapshot snapshot, int retryCount, DateTime brokerTimestampUtc)
+    {
+        // 断连判据用的是**断连前**的 map 名（原实现先取局部量再 Disconnect）
+        string mapName = _connectedMapName;
+        if (d.StallConfirmed && !snapshot.HasExtension)
+        {
             BrokerPushReceiver.Instance.MarkUnavailable();
-            UpdateDiagnostics(
-                connected: true,
-                protocolValid: true,
-                stalled: true,
-                mapName: _connectedMapName,
-                counter: counter,
-                version: snapshot.Layout.Version,
-                brokerTimestampUtc: brokerTimestampUtc,
-                usesCommitSequence: true,
-                commitSequence: snapshot.CommitSequence,
-                instanceId: snapshot.InstanceId,
-                monotonicPublishMs: snapshot.MonotonicPublishMs,
-                restartDelta: restartDelta,
-                unstableReadDelta: retryCount,
-                error: $"Broker has not published for {StallTimeout.TotalSeconds:F0} seconds");
-            return;
+            Disconnect();
         }
 
-        if (!skipPreviousCounterComparison && _lastCounter == counter)
-        {
-            bool stalled = IsStalled();
-            bool stallConfirmed = IsStallConfirmed();
-            string mapName = _connectedMapName;
-            if (stallConfirmed && !snapshot.HasExtension)
-            {
-                BrokerPushReceiver.Instance.MarkUnavailable();
-                Disconnect();
-            }
+        Report(SnapshotDeserializer.CounterUnchanged(
+            snapshot, mapName, brokerTimestampUtc, retryCount, StallTimeout,
+            d.Stalled, d.StallConfirmed, _hasPublishedSnapshot));
+    }
 
-            UpdateDiagnostics(
-                connected: snapshot.HasExtension || !stallConfirmed,
-                protocolValid: true,
-                stalled: stalled,
-                mapName: mapName,
-                counter: counter,
-                version: snapshot.Layout.Version,
-                brokerTimestampUtc: brokerTimestampUtc,
-                usesCommitSequence: snapshot.HasExtension,
-                commitSequence: snapshot.CommitSequence,
-                instanceId: snapshot.InstanceId,
-                monotonicPublishMs: snapshot.MonotonicPublishMs,
-                unstableReadDelta: retryCount,
-                error: stalled
-                    ? $"Broker commit counter has not advanced for {StallTimeout.TotalSeconds:F0} seconds"
-                    : _hasPublishedSnapshot
-                        ? ""
-                        : "Broker is initialized; waiting for the first data commit");
-            return;
-        }
-
-        if (!SharedMemorySnapshotParser.TryParse(
-            snapshot,
-            out ParsedSnapshot parsed,
-            out string parseError))
+    private void HandleReadyToPublish(
+        in StableSnapshot snapshot, int retryCount, DateTime brokerTimestampUtc, int restartDelta)
+    {
+        if (!SnapshotDeserializer.TryDeserialize(snapshot, out ParsedSnapshot parsed, out string parseError))
         {
             BrokerPushReceiver.Instance.MarkUnavailable();
-            UpdateDiagnostics(
-                connected: true,
-                protocolValid: false,
-                stalled: false,
-                mapName: _connectedMapName,
-                counter: counter,
-                version: snapshot.Layout.Version,
-                brokerTimestampUtc: brokerTimestampUtc,
-                usesCommitSequence: snapshot.HasExtension,
-                commitSequence: snapshot.CommitSequence,
-                instanceId: snapshot.InstanceId,
-                monotonicPublishMs: snapshot.MonotonicPublishMs,
-                restartDelta: restartDelta,
-                unstableReadDelta: retryCount,
-                error: parseError);
+            Report(SnapshotDeserializer.ParseFailed(
+                snapshot, _connectedMapName, brokerTimestampUtc, restartDelta, retryCount, parseError));
             return;
         }
 
         var nowUtc = DateTime.UtcNow;
-        BrokerPushReceiver.Instance.PushSnapshot(
-            parsed.CpuTemperature,
-            parsed.CpuSource,
-            parsed.Gpus,
-            parsed.Sensors);
+        SnapshotDeserializer.Publish(in parsed);
+        AdvancePublishedState(snapshot);
 
-        _lastCounter = counter;
-        _lastBrokerTimestampTicks = brokerTimestampTicks;
+        Report(SnapshotDeserializer.Published(
+            snapshot, _connectedMapName, brokerTimestampUtc, restartDelta, retryCount,
+            parsed.Sensors.Count, nowUtc));
+    }
+
+    /// <summary>成功发布后的 6 个字段推进（顺序与集合不得变）。</summary>
+    private void AdvancePublishedState(in StableSnapshot snapshot)
+    {
+        _lastCounter = snapshot.Counter;
+        _lastBrokerTimestampTicks = snapshot.BrokerTimestampTicks;
         _lastInstanceId = snapshot.InstanceId;
         _lastCounterAdvanceTimestamp = Stopwatch.GetTimestamp();
         _hasObservedSnapshot = true;
@@ -260,25 +226,52 @@ public sealed partial class SharedMemoryReader
         _lastObservedMapName = _connectedMapName;
         // 成功发布即恢复：上方 _lastCounterAdvanceTimestamp 的刷新已把确认窗口重新起算，
         // 时间基确认链无需再单独清零计数（原计数式实现才需要这一步）。
-
-        UpdateDiagnostics(
-            connected: true,
-            protocolValid: true,
-            stalled: false,
-            mapName: _connectedMapName,
-            counter: counter,
-            version: snapshot.Layout.Version,
-            sensorCount: parsed.Sensors.Count,
-            commitUtc: nowUtc,
-            brokerTimestampUtc: brokerTimestampUtc,
-            usesCommitSequence: snapshot.HasExtension,
-            commitSequence: snapshot.CommitSequence,
-            instanceId: snapshot.InstanceId,
-            monotonicPublishMs: snapshot.MonotonicPublishMs,
-            restartDelta: restartDelta,
-            unstableReadDelta: retryCount,
-            error: "");
     }
+
+    /// <summary>把适配层产出的参数包交给 Diagnostics（唯一的上报出口）。</summary>
+    private static void Report(in DiagnosticUpdate u) => UpdateDiagnostics(
+        connected: u.Connected,
+        protocolValid: u.ProtocolValid,
+        stalled: u.Stalled,
+        mapName: u.MapName,
+        counter: u.Counter,
+        version: u.Version,
+        sensorCount: u.SensorCount,
+        commitUtc: u.CommitUtc,
+        brokerTimestampUtc: u.BrokerTimestampUtc,
+        usesCommitSequence: u.UsesCommitSequence,
+        commitSequence: u.CommitSequence,
+        instanceId: u.InstanceId,
+        monotonicPublishMs: u.MonotonicPublishMs,
+        restartDelta: u.RestartDelta,
+        unstableReadDelta: u.UnstableReadDelta,
+        error: u.Error);
+
+    /// <summary>把决策要求的重启计数副作用写回 reader 字段（纯决策核不持有状态）。</summary>
+    private void ApplyRestartAccounting(in StabilityDecision decision, in StableSnapshot snapshot)
+    {
+        if (!decision.RestartDetected)
+            return;
+
+        if (decision.UpdateRestartCountedInstanceId)
+            _lastRestartCountedInstanceId = snapshot.InstanceId;
+
+        BrokerPushReceiver.Instance.MarkUnavailable();
+        // 哨兵 0 =「窗口从下一次 counter 前进重新起算」，语义见 IsStallConfirmed 注释
+        _lastCounterAdvanceTimestamp = 0;
+    }
+
+    /// <summary>构造决策核所需的状态视图（reader 字段 → 只读结构）。</summary>
+    private StabilityState BuildStabilityState() => new(
+        LastCounter: _lastCounter,
+        LastBrokerTimestampTicks: _lastBrokerTimestampTicks,
+        LastInstanceId: _lastInstanceId,
+        LastCounterAdvanceTimestamp: _lastCounterAdvanceTimestamp,
+        HasObservedSnapshot: _hasObservedSnapshot,
+        AwaitingCounterAdvance: _awaitingCounterAdvance,
+        RestartBaselineCounter: _restartBaselineCounter,
+        LastRestartCountedInstanceId: _lastRestartCountedInstanceId);
+
 
     private void ObserveBaseline(StableSnapshot snapshot)
     {
@@ -291,6 +284,11 @@ public sealed partial class SharedMemoryReader
         _lastObservedMapName = _connectedMapName;
     }
 
+    /// <summary>
+    /// 等待提交的统一出口（保留原签名与默认值，供本类各分支复用）。
+    /// 实现已收敛到 <see cref="SnapshotDeserializer.WaitingForCommit"/>。
+    /// </summary>
+    /// <remarks><c>MarkUnavailable</c> 与上报顺序保持原样（先摘可用性、后写诊断）。</remarks>
     private void ReportWaitingForCommit(
         StableSnapshot snapshot,
         DateTime brokerTimestampUtc,
@@ -301,25 +299,12 @@ public sealed partial class SharedMemoryReader
         bool connected = true)
     {
         BrokerPushReceiver.Instance.MarkUnavailable();
-        UpdateDiagnostics(
-            connected: connected,
-            protocolValid: true,
-            stalled: stalled,
-            mapName: _connectedMapName,
-            counter: snapshot.Counter,
-            version: snapshot.Layout.Version,
-            brokerTimestampUtc: brokerTimestampUtc,
-            usesCommitSequence: snapshot.HasExtension,
-            commitSequence: snapshot.CommitSequence,
-            instanceId: snapshot.InstanceId,
-            monotonicPublishMs: snapshot.MonotonicPublishMs,
-            restartDelta: restartDelta,
-            unstableReadDelta: retryCount,
-            error: error);
+        Report(SnapshotDeserializer.WaitingForCommit(
+            snapshot, _connectedMapName, brokerTimestampUtc, restartDelta, retryCount,
+            StallTimeout, stalled, connected, overrideError: error));
     }
 
-    private bool IsStalled() => _lastCounterAdvanceTimestamp > 0 &&
-        Stopwatch.GetElapsedTime(_lastCounterAdvanceTimestamp) >= StallTimeout;
+    private bool IsStalled() => _stability.IsStalled(_lastCounterAdvanceTimestamp);
 
     /// <summary>
     /// 确认链（时间基，与 raw 观察面 <see cref="IsStalled"/> 分离）：自上次 counter 前进起
@@ -335,28 +320,14 @@ public sealed partial class SharedMemoryReader
     /// _lastCounterAdvanceTimestamp == 0 是「刚重启/刚重连，窗口从下一次前进重新计」的哨兵，
     /// 此时一律不确认（与原实现 IsStalled() 的短路语义一致，重启检测/reset 行为不变）。
     /// 窗口**有界**：耗尽即返回 true，不存在无限容忍。
+    /// 实现已移至 <see cref="SnapshotStabilityTracker.IsStallConfirmed"/>，本方法保持原签名转发
+    /// （SharedMemoryReader.cs:ReadOnce 仍在调用，且 harness 依赖 <c>_lastCounterAdvanceTimestamp</c> 留驻）。
     /// </summary>
-    private bool IsStallConfirmed()
-    {
-        if (_lastCounterAdvanceTimestamp <= 0)
-            return false;
+    private bool IsStallConfirmed() => _stability.IsStallConfirmed(_lastCounterAdvanceTimestamp);
 
-        // ConfirmStallWindow(15s) > StallTimeout(5s)，故窗口耗尽必然已满足 raw stall 观察；
-        // 确认链是观察面的**超集**，不会在观察尚未成立时提前确认。
-        return Stopwatch.GetElapsedTime(_lastCounterAdvanceTimestamp) >= ConfirmStallWindow;
-    }
-
-    private static bool IsBrokerPublishStalled(long monotonicPublishMs)
-    {
-        long elapsedMilliseconds = unchecked(Environment.TickCount64 - monotonicPublishMs);
-        return elapsedMilliseconds < 0 || elapsedMilliseconds >= StallTimeout.TotalMilliseconds;
-    }
-
-    private static bool CounterMovedBackwards(int previous, int current)
-    {
-        uint forwardDistance = unchecked((uint)(current - previous));
-        return forwardDistance > int.MaxValue;
-    }
+    /// <summary>判据 A 的 extension 面：见 <see cref="SnapshotStabilityTracker.IsBrokerPublishStalled"/>。</summary>
+    private bool IsBrokerPublishStalled(long monotonicPublishMs) =>
+        _stability.IsBrokerPublishStalled(monotonicPublishMs);
 
     private static DateTime ToUtcTimestamp(long ticks)
     {
