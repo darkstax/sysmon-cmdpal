@@ -177,13 +177,12 @@ internal sealed partial class NetworkDetailPage : RefreshingContentPage
             string upScale = SystemInfoService.Instance.NetUpChart.GetCurrentScaleLabel();
 
             var ssid = SystemInfoService.Instance.GetWifiSsid();
+            var connectionType = GetConnectionTypeDisplay(ssid);
             var data = new Dictionary<string, string>
             {
                 ["netDown"] = DockFormat.Speed(info.NetDown),
                 ["netUp"] = DockFormat.Speed(info.NetUp),
-                ["ssid"] = string.IsNullOrEmpty(ssid)
-                    ? "未连接 Wi-Fi"
-                    : $"SSID: {ssid}",
+                ["ssid"] = connectionType,
                 ["downScale"] = downScale,
                 ["upScale"] = upScale,
                 ["downChartUrl"] = downUrl,
@@ -200,4 +199,38 @@ internal sealed partial class NetworkDetailPage : RefreshingContentPage
     }
 
     private static string FormatSpeedOrNA(double value) => value >= 0 ? DockFormat.Speed(value) : Loc.Get("Common.NA");
+
+    /// <summary>
+    /// 获取网络连接类型显示文本。
+    /// 优先级：Wi-Fi SSID > 有线网络 > 未连接。
+    /// </summary>
+    private static string GetConnectionTypeDisplay(string? wifiSsid)
+    {
+        // 有 Wi-Fi SSID：显示 Wi-Fi 连接
+        if (!string.IsNullOrEmpty(wifiSsid))
+            return $"SSID: {wifiSsid}";
+
+        // 检查是否有活动的有线网络接口
+        var interfaces = NetworkMonitor.GetPhysicalInterfaces();
+        foreach (var ni in interfaces)
+        {
+            if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Ethernet &&
+                ni.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up)
+            {
+                return "已连接有线网";
+            }
+        }
+
+        // 检查是否有其他活动网络接口（非 Wi-Fi）
+        foreach (var ni in interfaces)
+        {
+            if (ni.NetworkInterfaceType != System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211 &&
+                ni.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up)
+            {
+                return "已连接网络";
+            }
+        }
+
+        return "未连接网络";
+    }
 }
