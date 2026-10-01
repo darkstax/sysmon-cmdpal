@@ -24,7 +24,11 @@ public sealed class SharedMemoryReaderHealthTests
 
         // 首帧后：已观察 baseline，未发布，等待 counter 前进
         var diag = SharedMemoryReader.Diagnostics;
-        Assert.False(diag.IsConnected);          // MarkUnavailable 已调用
+        // 等待提交期间 reader **仍然连着 map**：ReportWaitingForCommit 的 connected 参数默认 true，
+        // 它只把可用性面摘掉。不可用的是 BrokerPushReceiver **数据面**，不是 Diagnostics.IsConnected——
+        // 两者混为一谈是本用例原断言错误（正典对照见 SharedMemoryStallConfirmWindowTests）。
+        Assert.True(diag.IsConnected);
+        Assert.False(harness.Receiver.IsBrokerAvailable);   // MarkUnavailable 已生效（数据面）
         Assert.True(diag.IsProtocolValid);
         Assert.False(diag.IsStalled);
         Assert.Equal("Broker is initialized; waiting for the first data commit", diag.LastError);
@@ -62,7 +66,9 @@ public sealed class SharedMemoryReaderHealthTests
         harness.ProcessV2(BrokerTestData.V2Buffer(counter: 1, cpuTemperature: 40.0), counter: 1, DateTime.UtcNow.Ticks);
 
         var diag = SharedMemoryReader.Diagnostics;
-        Assert.False(diag.IsConnected);
+        // 重启后进入「等待下一次提交」，reader 仍连着 map（同 B1：IsConnected 不等于数据面可用）
+        Assert.True(diag.IsConnected);
+        Assert.False(harness.Receiver.IsBrokerAvailable);
         Assert.Equal(1, diag.RestartCount);
         Assert.Contains("Broker restart detected", diag.LastError);
     }
@@ -71,13 +77,21 @@ public sealed class SharedMemoryReaderHealthTests
     public void ProcessStableSnapshot_SameCounterNewTimestamp_DetectsRestart()
     {
         using var harness = new SharedMemoryReaderHarness();
-        harness.ProcessV2(BrokerTestData.V2Buffer(counter: 5, cpuTemperature: 42.0), counter: 5, DateTime.UtcNow.Ticks);
+        // 「同 counter 但新时间戳 ⇒ 重启」的判据 sameCounterNewTimestamp 仅对**无 extension 的传统路径**成立
+        // （Health.cs 的 !snapshot.HasExtension 前置），带 extension 时必须走 instanceId 判据。
+        // 故此处显式构造传统 map（extensionMagic:0）——V2Buffer 默认带 extension，是原夹具的错路。
+        harness.ProcessV2(
+            BrokerTestData.V2Buffer(counter: 5, cpuTemperature: 42.0, extensionMagic: 0), counter: 5, DateTime.UtcNow.Ticks);
 
         // 同 counter 但新时间戳（无 extension 的旧 Broker 重启）
-        harness.ProcessV2(BrokerTestData.V2Buffer(counter: 5, cpuTemperature: 42.0), counter: 5, DateTime.UtcNow.Ticks + TimeSpan.TicksPerSecond);
+        harness.ProcessV2(
+            BrokerTestData.V2Buffer(counter: 5, cpuTemperature: 42.0, extensionMagic: 0),
+            counter: 5,
+            DateTime.UtcNow.Ticks + TimeSpan.TicksPerSecond);
 
         var diag = SharedMemoryReader.Diagnostics;
-        Assert.False(diag.IsConnected);
+        Assert.True(diag.IsConnected);
+        Assert.False(harness.Receiver.IsBrokerAvailable);
         Assert.Equal(1, diag.RestartCount);
     }
 
@@ -87,17 +101,24 @@ public sealed class SharedMemoryReaderHealthTests
     public void ProcessStableSnapshot_CounterNotAdvanced_StallConfirmedDisconnects()
     {
         using var harness = new SharedMemoryReaderHarness();
-        harness.ProcessV2(BrokerTestData.V2Buffer(counter: 1, cpuTemperature: 42.0), counter: 1, DateTime.UtcNow.Ticks);
+        // 断连（Disconnect）**仅对无 extension 的传统路径生效**（Health.cs 的 !snapshot.HasExtension 前置）；
+        // 带 extension 的现代路径按设计绝不 Disconnect（可用性由新鲜度网支配）。
+        // 原夹具用默认带 extension 的 V2Buffer 断言 Disconnect，属走错路径——正典蓝本见
+        // SharedMemoryStallConfirmWindowTests 用例②（LegacyMap_SilentBeyondConfirmWindow_ConfirmsStallAndDisconnects）。
+        byte[] buffer = BrokerTestData.V2Buffer(counter: 1, cpuTemperature: 42.0, extensionMagic: 0);
+        long ts = DateTime.UtcNow.Ticks;   // 两次必须同一时间戳，否则首帧即触发 sameCounterNewTimestamp 重启分支
+        harness.ProcessV2(buffer, counter: 1, ts);
 
         // 推进到确认窗口（15s）之后
         harness.SetLastCounterAdvanceElapsed(TimeSpan.FromSeconds(16));
 
-        harness.ProcessV2(BrokerTestData.V2Buffer(counter: 1, cpuTemperature: 42.0), counter: 1, DateTime.UtcNow.Ticks);
+        harness.ProcessV2(buffer, counter: 1, ts);
 
         var diag = SharedMemoryReader.Diagnostics;
         Assert.True(diag.IsStalled);
         Assert.False(diag.IsConnected);
         Assert.True(harness.IsDisconnectedFromMap);
+        Assert.False(harness.Receiver.IsBrokerAvailable);
     }
 
     [Fact]
@@ -168,7 +189,10 @@ public sealed class SharedMemoryReaderHealthTests
 
         var diag = SharedMemoryReader.Diagnostics;
         Assert.False(diag.IsProtocolValid);
-        Assert.Contains("Shared memory changed", diag.LastError);
+        // 文案来自解析路径（SharedMemorySnapshotParser：sensor count 越界），
+        // 而 "Shared memory changed" 是**读取端不稳定双读**的报错（SharedMemorySnapshotReader），
+        // 根本不是本用例构造的解析失败——原期望串张冠李戴。
+        Assert.Contains("Invalid sensor count", diag.LastError);
     }
 
     // ---- 诊断状态累积 ----
@@ -178,13 +202,18 @@ public sealed class SharedMemoryReaderHealthTests
     {
         using var harness = new SharedMemoryReaderHarness();
 
-        harness.ProcessV2(BrokerTestData.V2Buffer(counter: 1, cpuTemperature: 42.0), counter: 1, DateTime.UtcNow.Ticks);
-        harness.ProcessV2(BrokerTestData.V2Buffer(counter: 2, cpuTemperature: 43.0), counter: 2, DateTime.UtcNow.Ticks);
-        harness.ProcessV2(BrokerTestData.V2Buffer(counter: 3, cpuTemperature: 44.0), counter: 3, DateTime.UtcNow.Ticks);
+        // 原断言把 CPU 温度 44.0 当成传感器计数比（`diag.LastSensorCount > 0 ? ... : 0`），
+        // 而 V2Buffer 不传 sensors ⇒ 计数恒 0，该等式无从成立（44.0 是温度，不是计数）。
+        // 修复 = 喂入 1 个真实测试传感器，让 LastSensorCount 有确定语义，断言保留累积意图。
+        TestSensor[] sensors = [new TestSensor(ShmLayout.TagCpuPower, "CPU Package", 52.5, "W", ShmLayout.HwCpu)];
+
+        harness.ProcessV2(BrokerTestData.V2Buffer(counter: 1, cpuTemperature: 42.0, sensors: sensors), counter: 1, DateTime.UtcNow.Ticks);
+        harness.ProcessV2(BrokerTestData.V2Buffer(counter: 2, cpuTemperature: 43.0, sensors: sensors), counter: 2, DateTime.UtcNow.Ticks);
+        harness.ProcessV2(BrokerTestData.V2Buffer(counter: 3, cpuTemperature: 44.0, sensors: sensors), counter: 3, DateTime.UtcNow.Ticks);
 
         var diag = SharedMemoryReader.Diagnostics;
         Assert.Equal(3, diag.LastCounter);
-        Assert.Equal(44.0, diag.LastSensorCount > 0 ? diag.LastSensorCount : 0);
+        Assert.Equal(1, diag.LastSensorCount);
         Assert.True(diag.LastReadUtc > DateTime.MinValue);
         Assert.True(diag.LastCommitUtc > DateTime.MinValue);
     }

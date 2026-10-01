@@ -163,8 +163,13 @@ public sealed class HwinfoSharedMemoryLayoutTests
     {
         var units = new[] { HwinfoTestData.Unit("GPU") };
         var entries = new[] { HwinfoTestData.Temp(0, 50.0) };
-        // 把 unitSize 撑大到越界
-        byte[] data = HwinfoTestData.BuildSection(units, entries, unitSize: 1000);
+        // 制造「units 数组越过 entries 起点」**只能靠 header 谎报 unitCount**：
+        // BuildSection 会按 unitSize 自洽重算 entryOffset = 48 + unitSize×count，
+        // 故 units 数组尾恒等于 entryOffset（合法的相等等式，见生产码 "本机实测恰等于" 注释），
+        // 把 unitSize 撑多大都不会越界——原夹具 (unitSize:1000) 因此永远命中不了该分支。
+        // 镜像同域正典用例 GpuHwinfoLayoutFailFastTests.UnitsArray_OverrunningEntriesStart_DisablesUnitsFace。
+        byte[] data = HwinfoTestData.BuildSection(units, entries);   // 默认 unitSize=392, entryOffset=440
+        System.BitConverter.TryWriteBytes(data.AsSpan(28, 4), 10);   // 谎报 unitCount=10 ⇒ 48+392×10=3968 > 440
 
         bool ok = HwinfoSharedMemoryLayout.TryParse(data, out var snapshot, out _);
 
