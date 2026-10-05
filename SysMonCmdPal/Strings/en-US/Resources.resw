@@ -776,4 +776,24 @@ No battery detected (desktop or virtual machine).</value>
   <data name="SensorBrowse.Storage" xml:space="preserve">
     <value>Storage</value>
   </data>
+
+  <!-- ==================== NIC selection ==================== -->
+  <data name="Settings.NicSelectionLabel" xml:space="preserve">
+    <value>Primary network adapter</value>
+  </data>
+  <data name="Settings.NicSelectionDescription" xml:space="preserve">
+    <value>Automatically prefers hardware adapters (identified by the PCI/USB bus prefix of the device instance ID) and excludes virtual, tunneled, and filter-mirror interfaces. If detection is wrong, pick the adapter to monitor here.</value>
+  </data>
+  <data name="Settings.NicAutoChoice" xml:space="preserve">
+    <value>Automatic (recommended)</value>
+  </data>
+  <data name="Settings.NicKindHardware" xml:space="preserve">
+    <value>Hardware</value>
+  </data>
+  <data name="Settings.NicKindVirtual" xml:space="preserve">
+    <value>Virtual</value>
+  </data>
+  <data name="Settings.NicKindUnknown" xml:space="preserve">
+    <value>Unidentified</value>
+  </data>
 </root>

@@ -34,4 +34,252 @@ public class SysMonSettingsManagerTests
             File.Delete(path);
         }
     }
+
+    // ================================================================
+    // selectedNicGuids — 网卡手动选择键的持久化
+    // ================================================================
+
+    [Fact]
+    public void SelectedNicsKey_IsManagedSoSaveDoesNotDropIt()
+    {
+        // ManagedKeys 必须含 selectedNicGuids，否则 SaveSettings 的
+        // PreserveUnmanagedSettings 会把它当"非托管键"处理，语义错位。
+        string path = Path.Combine(Path.GetTempPath(), $"sysmon_nic_{Guid.NewGuid():N}.json");
+        try
+        {
+            File.WriteAllText(path, @"{""selectedNicGuids"":""{A844F74B-BAB2-459B-9EC8-922D56E146EC}""}");
+            var existing = JsonNode.Parse(
+                @"{""version"":""4"",""selectedNicGuids"":""auto"",""btopPath"":""C:\\btop.exe""}")!.AsObject();
+
+            SysMonSettingsManager.PreserveUnmanagedSettings(
+                path,
+                existing,
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    SysMonSettingsManager.BtopPathKey,
+                    SysMonSettingsManager.SelectedNicsKey,
+                });
+
+            var updated = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+
+            // 文件里的（用户刚保存的）选择值不被 existing 覆盖
+            Assert.Equal("{A844F74B-BAB2-459B-9EC8-922D56E146EC}", (string?)updated["selectedNicGuids"]);
+            // 非托管键仍被保留
+            Assert.Equal("4", (string?)updated["version"]);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void SelectedNicsKey_MatchesClassifierConstant()
+    {
+        Assert.Equal(NetworkInterfaceClassifier.SelectedNicsKey, SysMonSettingsManager.SelectedNicsKey);
+        Assert.Equal("selectedNicGuids", SysMonSettingsManager.SelectedNicsKey);
+    }
+
+    [Fact]
+    public void PreserveUnmanagedSettings_StillRestoresOtherKeysWithNicKeyManaged()
+    {
+        // 回归：把 selectedNicGuids 加入托管键后，其他未知键的保留行为不得改变
+        string path = Path.Combine(Path.GetTempPath(), $"sysmon_nic2_{Guid.NewGuid():N}.json");
+        try
+        {
+            File.WriteAllText(path, @"{""btopPath"":""C:\\tools\\btop.exe"",""selectedNicGuids"":""auto""}");
+            var existing = JsonNode.Parse(
+                @"{""version"":""4"",""precisionModeStr"":""Broker"",""future"":{""enabled"":true}}")!.AsObject();
+
+            SysMonSettingsManager.PreserveUnmanagedSettings(
+                path,
+                existing,
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    SysMonSettingsManager.BtopPathKey,
+                    SysMonSettingsManager.SelectedNicsKey,
+                });
+
+            var updated = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+
+            Assert.Equal("4", (string?)updated["version"]);
+            Assert.Equal("Broker", (string?)updated["precisionModeStr"]);
+            Assert.True((bool?)updated["future"]?["enabled"]);
+            Assert.Equal("auto", (string?)updated["selectedNicGuids"]);
+            Assert.Equal(@"C:\tools\btop.exe", (string?)updated["btopPath"]);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    // ================================================================
+    // NetworkMonitor 直读 settings.json（与设置管理器解耦）
+    // ================================================================
+
+    [Fact]
+    public void ReadSelectedNicsFromSettings_ReadsKeyViaConfigPath()
+    {
+        var realPath = SensorChainConfig.ConfigPath;
+        string path = Path.Combine(Path.GetTempPath(), $"sysmon_nic3_{Guid.NewGuid():N}.json");
+        try
+        {
+            SensorChainConfig.ConfigPath = path;
+
+            // 文件不存在 ⇒ null（= 自动模式）
+            Assert.Null(NetworkMonitor.ReadSelectedNicsFromSettings());
+
+            File.WriteAllText(path, @"{""btopPath"":"""",""selectedNicGuids"":""{A844F74B-BAB2-459B-9EC8-922D56E146EC}""}");
+            Assert.Equal("{A844F74B-BAB2-459B-9EC8-922D56E146EC}",
+                NetworkMonitor.ReadSelectedNicsFromSettings());
+
+            // 键缺失 ⇒ null
+            File.WriteAllText(path, @"{""btopPath"":""""}");
+            Assert.Null(NetworkMonitor.ReadSelectedNicsFromSettings());
+
+            // 非法 JSON ⇒ null（绝不抛给采集循环）
+            File.WriteAllText(path, "{ not json ");
+            Assert.Null(NetworkMonitor.ReadSelectedNicsFromSettings());
+        }
+        finally
+        {
+            SensorChainConfig.ConfigPath = realPath;
+            File.Delete(path);
+        }
+    }
+
+    // ================================================================
+    // 端到端：选中网卡 → 保存 → 重启 → 仍然生效
+    // ================================================================
+
+    /// <summary>
+    /// 回归守卫：LoadSettings() 在 ctor 里执行，此时 ChoiceSetSetting.Choices 只含占位 "auto"。
+    /// ChoiceSetSetting.Update 在值不在 Choices 里且 IgnoreUnknownValue=true 时**静默丢弃**该值，
+    /// 因此若不在加载后从文件恢复，用户选好的网卡每次启动都会被重置成 auto。
+    /// </summary>
+    [Fact]
+    public void NicSelection_SurvivesReloadFromSettingsFile()
+    {
+        var realPath = SensorChainConfig.ConfigPath;
+        string path = Path.Combine(Path.GetTempPath(), $"sysmon_nic_reload_{Guid.NewGuid():N}.json");
+        try
+        {
+            SensorChainConfig.ConfigPath = path;
+
+            const string nicGuid = "{A844F74B-BAB2-459B-9EC8-922D56E146EC}";
+            File.WriteAllText(path, $@"{{""btopPath"":"""",""selectedNicGuids"":""{nicGuid}""}}");
+
+            var manager = new SysMonSettingsManager();
+
+            // 关键断言：重启后持久值必须存活（不能被 IgnoreUnknownValue 丢掉）
+            Assert.Equal(nicGuid, manager.NicSelectionSetting.Value);
+        }
+        finally
+        {
+            SensorChainConfig.ConfigPath = realPath;
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [Fact]
+    public void NicSelection_FreshInstallDefaultsToAuto()
+    {
+        var realPath = SensorChainConfig.ConfigPath;
+        string path = Path.Combine(Path.GetTempPath(), $"sysmon_nic_fresh_{Guid.NewGuid():N}.json");
+        try
+        {
+            SensorChainConfig.ConfigPath = path;   // 文件不存在
+
+            var manager = new SysMonSettingsManager();
+
+            Assert.Equal(NetworkInterfaceClassifier.AutoSelectionValue, manager.NicSelectionSetting.Value);
+        }
+        finally
+        {
+            SensorChainConfig.ConfigPath = realPath;
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [Fact]
+    public void NicSelection_AutoLiteralStaysAuto()
+    {
+        var realPath = SensorChainConfig.ConfigPath;
+        string path = Path.Combine(Path.GetTempPath(), $"sysmon_nic_auto_{Guid.NewGuid():N}.json");
+        try
+        {
+            SensorChainConfig.ConfigPath = path;
+            File.WriteAllText(path, @"{""selectedNicGuids"":""auto""}");
+
+            var manager = new SysMonSettingsManager();
+
+            Assert.Equal("auto", manager.NicSelectionSetting.Value);
+        }
+        finally
+        {
+            SensorChainConfig.ConfigPath = realPath;
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [Fact]
+    public void NicSelection_SavePersistsValueAndPreservesOtherKeys()
+    {
+        var realPath = SensorChainConfig.ConfigPath;
+        string path = Path.Combine(Path.GetTempPath(), $"sysmon_nic_save_{Guid.NewGuid():N}.json");
+        try
+        {
+            SensorChainConfig.ConfigPath = path;
+            File.WriteAllText(path, @"{""version"":""4"",""btopPath"":""C:\\btop.exe""}");
+
+            var manager = new SysMonSettingsManager();
+            const string nicGuid = "{5B4FBC47-6C51-48AC-8D79-E6E057816F16}";
+            manager.NicSelectionSetting.Value = nicGuid;
+            manager.SaveSettings();
+
+            var saved = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+
+            Assert.Equal(nicGuid, (string?)saved[SysMonSettingsManager.SelectedNicsKey]);
+            // 非托管键不得丢失
+            Assert.Equal("4", (string?)saved["version"]);
+            Assert.Equal(@"C:\btop.exe", (string?)saved["btopPath"]);
+        }
+        finally
+        {
+            SensorChainConfig.ConfigPath = realPath;
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// 回归守卫：IgnoreUnknownValue 的既有语义必须保留 ——
+    /// 回传一个不在选项里的失效 GUID 时忽略该次更新，而不是把悬空值写进去。
+    /// </summary>
+    [Fact]
+    public void NicSelection_IgnoresUpdateWithUnknownValue()
+    {
+        var realPath = SensorChainConfig.ConfigPath;
+        string path = Path.Combine(Path.GetTempPath(), $"sysmon_nic_unknown_{Guid.NewGuid():N}.json");
+        try
+        {
+            SensorChainConfig.ConfigPath = path;
+            const string nicGuid = "{A844F74B-BAB2-459B-9EC8-922D56E146EC}";
+            File.WriteAllText(path, $@"{{""selectedNicGuids"":""{nicGuid}""}}");
+
+            var manager = new SysMonSettingsManager();
+            Assert.Equal(nicGuid, manager.NicSelectionSetting.Value);
+
+            var stale = JsonNode.Parse(
+                @"{""selectedNicGuids"":""{11111111-2222-3333-4444-555555555555}""}")!.AsObject();
+            manager.NicSelectionSetting.Update(stale);
+
+            Assert.Equal(nicGuid, manager.NicSelectionSetting.Value);
+        }
+        finally
+        {
+            SensorChainConfig.ConfigPath = realPath;
+            try { File.Delete(path); } catch { }
+        }
+    }
 }

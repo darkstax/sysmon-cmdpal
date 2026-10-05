@@ -776,4 +776,24 @@
   <data name="SensorBrowse.Storage" xml:space="preserve">
     <value>存储</value>
   </data>
+
+  <!-- ==================== NIC selection ==================== -->
+  <data name="Settings.NicSelectionLabel" xml:space="preserve">
+    <value>主网卡</value>
+  </data>
+  <data name="Settings.NicSelectionDescription" xml:space="preserve">
+    <value>自动优先识别硬件网卡（按设备实例 ID 的 PCI/USB 总线前缀判定），排除虚拟/隧道/镜像接口。若识别有误，可在此手动指定要监控的网卡。</value>
+  </data>
+  <data name="Settings.NicAutoChoice" xml:space="preserve">
+    <value>自动（推荐）</value>
+  </data>
+  <data name="Settings.NicKindHardware" xml:space="preserve">
+    <value>硬件</value>
+  </data>
+  <data name="Settings.NicKindVirtual" xml:space="preserve">
+    <value>虚拟</value>
+  </data>
+  <data name="Settings.NicKindUnknown" xml:space="preserve">
+    <value>未识别</value>
+  </data>
 </root>

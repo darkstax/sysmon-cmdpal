@@ -38,6 +38,12 @@ public partial class SystemInfoService
     private readonly ISystemInfoSource[] _sources;
 
     /// <summary>
+    /// 生产注册表里的网络采集源（null = 测试注入构造，无真实 monitor）。
+    /// 供设置变更时失效网卡选择缓存用。
+    /// </summary>
+    internal NetworkMonitor? NetworkMonitorSource { get; }
+
+    /// <summary>
     /// 默认注册表 — 生产构造函数与顺序守护测试共用这一份数据（R(t1) F2：消灭影子注册表）。
     /// 只创建源对象，不触发任何硬件读取。时序与注册序严格解耦（F2 硬约束）：
     ///   ① 实例化顺序 = 重构前字段初始化器声明顺序（network→disk→cpuFreq→cpuUsage），
@@ -70,6 +76,7 @@ public partial class SystemInfoService
     {
         // 生产注册表 = BuildDefaultSources（守护测试验证的正是这份数据）。
         _sources = BuildDefaultSources(out var network);
+        NetworkMonitorSource = network;
 
         // 首次播种网络计数器（不计算速度，只记录基线）
         try { network.Seed(); }
@@ -84,6 +91,7 @@ public partial class SystemInfoService
     internal SystemInfoService(IEnumerable<ISystemInfoSource> sources)
     {
         _sources = sources is ISystemInfoSource[] arr ? arr : new List<ISystemInfoSource>(sources).ToArray();
+        NetworkMonitorSource = _sources.OfType<NetworkMonitor>().FirstOrDefault();
     }
 
     /// <summary>

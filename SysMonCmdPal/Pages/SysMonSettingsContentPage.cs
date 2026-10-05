@@ -16,11 +16,16 @@ internal sealed partial class SysMonSettingsContentPage : ContentPage
     private readonly Microsoft.CommandPalette.Extensions.Toolkit.Settings _valueSettings;
     private readonly BrokerInstallSettingsForm _brokerInstallForm;
 
+    /// <summary>进入设置页前重建动态选项（网卡列表是运行时集合）。</summary>
+    private readonly Action? _refreshDynamicChoices;
+
     public SysMonSettingsContentPage(
         Microsoft.CommandPalette.Extensions.Toolkit.Settings valueSettings,
-        BrokerInstallController brokerInstallController)
+        BrokerInstallController brokerInstallController,
+        Action? refreshDynamicChoices = null)
     {
         _valueSettings = valueSettings;
+        _refreshDynamicChoices = refreshDynamicChoices;
         _brokerInstallForm = new BrokerInstallSettingsForm(brokerInstallController);
         _brokerInstallForm.ContentChanged += (_, _) => RaiseItemsChanged();
 
@@ -31,7 +36,14 @@ internal sealed partial class SysMonSettingsContentPage : ContentPage
     }
 
     public override IContent[] GetContent()
-        => [.. _valueSettings.ToContent(), _brokerInstallForm];
+    {
+        // 每次取内容都重建一次网卡选项：CmdPal 每次进入设置页都会调这里，
+        // 天然是刷新点，不需要后台监听网卡插拔。
+        try { _refreshDynamicChoices?.Invoke(); }
+        catch { /* 选项重建失败不得影响设置页其余部分 */ }
+
+        return [.. _valueSettings.ToContent(), _brokerInstallForm];
+    }
 }
 
 internal sealed partial class BrokerInstallSettingsForm : FormContent
