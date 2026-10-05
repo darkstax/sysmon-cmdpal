@@ -28,6 +28,7 @@ internal sealed class NetworkMonitor : ISystemInfoSource
         "Meta",
         "TAP-Windows",
         "Tunnel",
+        "NDIS 6 Filter",  // 卡巴斯基等安全软件的 NDIS 过滤器镜像接口
     ];
 
     private static readonly string[] ExcludedNameTokens =
