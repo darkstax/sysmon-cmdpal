@@ -45,9 +45,46 @@ internal readonly record struct NicCandidate(
     long Speed,
     NicClassification Classification);
 
+/// <summary>
+/// 接口在设置页的可用性分类 —— 同时决定三件事：是否正常列入选项、
+/// 已选时是否补回列表、以及补回时用哪个标注。
+///
+/// 为什么需要分类而不是一个 bool：bool 无法区分「临时断连（可恢复，值得保住用户选择）」
+/// 与「永久不可用（镜像，绝不可选）」和「已连接但采集不到（不能谎称未连接）」，
+/// 会把镜像也当成"临时不可用"补回列表（t3 round-3 finding）。
+///
+/// 公开可见性（而非 internal）：xUnit 测试类必须 public，public 测试方法的
+/// InlineData 参数类型也须 public —— 与既有 NicClassification/GpuKind 同一处理方式。
+/// </summary>
+public enum NicUsability
+{
+    /// <summary>可生效：正常列入选项，无标注。</summary>
+    Effective = 0,
+
+    /// <summary>
+    /// 未连接（OperationalStatus != Up）。可恢复 ⇒ 已选时补回列表并标「（未连接）」，
+    /// 保住用户的选择意图，避免一次短暂断连就永久丢失。
+    /// </summary>
+    Disconnected = 1,
+
+    /// <summary>
+    /// 已连接但当前采集不到（speed ≤ 0，或类型不是 Ethernet/Wireless80211）。
+    /// **不**标「（未连接）」—— 那与事实不符（接口确实是 Up 的）；
+    /// 也不补回列表（无法给出准确标注），由 ResolveNicSelection 收敛为 auto。
+    /// </summary>
+    NotCollectable = 2,
+
+    /// <summary>
+    /// 永久不可用：过滤器镜像接口。与父网卡字节计数重复，选中必致流量翻倍
+    /// （见 <see cref="NetworkMonitor.IsFilterMirror"/>）⇒ 永不列入、永不补回，
+    /// 已选则收敛为 auto。
+    /// </summary>
+    PermanentlyUnavailable = 3,
+}
+
 /// <summary>设置页选择项的数据源（脱离 NetworkInterface 对象，便于纯函数单测）。</summary>
-/// <param name="IsEffective">
-/// 选中后是否真的会生效（过硬门槛且非过滤器镜像）。设置页只列可生效接口 ——
+/// <param name="Usability">
+/// 可用性分类。只有 <see cref="NicUsability.Effective"/> 会正常列入选项 ——
 /// 宿主机实测 65 个接口里仅 20 个可生效，其余 45 个选中是静默 no-op。
 /// </param>
 internal readonly record struct NicChoiceSource(
@@ -55,7 +92,7 @@ internal readonly record struct NicChoiceSource(
     string Name,
     string Description,
     NicClassification Classification,
-    bool IsEffective = true);
+    NicUsability Usability = NicUsability.Effective);
 
 /// <summary>注册表绑定表读取接缝：生产 = HKLM 只读；测试 = fixture 字典注入。</summary>
 internal interface INicBindingProvider
@@ -203,12 +240,17 @@ internal static class NetworkInterfaceClassifier
     /// 为什么过滤：宿主机实测 65 个接口里只有 20 个过硬门槛（Up + Ethernet/Wireless80211
     /// + speed &gt; 0），其余 45 个（NotPresent 的 WAN Miniport、Down 的 filter 镜像等）
     /// 选中后是静默 no-op —— 用户以为选了、实际不生效，是纯粹的误导。
-    /// 镜像接口也一并排除（选中必然导致流量翻倍，见 NetworkMonitor.IsFilterMirror）。
     ///
-    /// <paramref name="currentValue"/> 例外：用户**已选**但当前不可生效的接口（如临时 Down）
-    /// 会以"未连接"标注补回列表。若不补，它会被判为"已消失"而把用户的选择静默重置成 auto ——
-    /// 用户明明只是想监控某张卡，一次短暂断连就永久丢失该意图。
-    /// 只有 GUID 在系统里彻底不存在（拔出/卸载驱动）时才真的回退 auto。
+    /// <paramref name="currentValue"/> 例外：用户**已选**且属于
+    /// <see cref="NicUsability.Disconnected"/>（临时断连，可恢复）的接口会以
+    /// <paramref name="unavailableSuffix"/> 标注补回列表。若不补，它会被判为"已消失"
+    /// 而把用户的选择静默重置成 auto —— 用户明明只想监控某张卡，一次短暂断连就永久丢失该意图。
+    ///
+    /// 另外两类**不**补回（t3 round-3 finding）：
+    ///   · <see cref="NicUsability.PermanentlyUnavailable"/>（过滤器镜像）：选中必致流量翻倍，
+    ///     补回等于把它又变成一个可选项 ⇒ 直接让 ResolveNicSelection 收敛为 auto。
+    ///   · <see cref="NicUsability.NotCollectable"/>（Up 但 speed ≤ 0 / 类型不符）：
+    ///     接口确实是 Up 的，标「（未连接）」与事实不符 ⇒ 同样不补回、收敛为 auto。
     /// </summary>
     internal static List<ChoiceSetSetting.Choice> BuildNicChoices(
         IReadOnlyList<NicChoiceSource> interfaces,
@@ -223,24 +265,54 @@ internal static class NetworkInterfaceClassifier
         };
 
         foreach (var nic in interfaces
-            .Where(i => i.IsEffective)
+            .Where(i => i.Usability == NicUsability.Effective)
             .OrderBy(i => KindRank(i.Classification))
             .ThenBy(i => i.Name, StringComparer.CurrentCultureIgnoreCase))
         {
             choices.Add(BuildChoice(nic, kindLabel, suffix: ""));
         }
 
-        // 已选但不可生效的接口：补回列表并标注，保住用户的选择意图。
+        // 已选且"临时断连（可恢复）"的接口：补回列表并标注，保住用户的选择意图。
+        // 镜像与"已连接但采集不到"都不在此列 —— 前者永不可选，后者无法给出准确标注。
         var selected = ParseSelectedGuids(currentValue);
         foreach (var nic in interfaces)
         {
-            if (nic.IsEffective || !selected.Contains(nic.Id))
+            if (nic.Usability != NicUsability.Disconnected || !selected.Contains(nic.Id))
                 continue;
 
             choices.Add(BuildChoice(nic, kindLabel, suffix: unavailableSuffix));
         }
 
         return choices;
+    }
+
+    /// <summary>
+    /// 判定接口在设置页的可用性 —— **唯一判据来源**，生产枚举与单测共用。
+    ///
+    /// 顺序有讲究：先判镜像（永不可用优先于一切），再判是否 Up（决定是否可恢复），
+    /// 最后判是否可采集（speed/type）。这个顺序保证镜像永远不会被当成"临时断连"
+    /// 而补回列表（t3 round-3 finding 的根因）。
+    /// </summary>
+    internal static NicUsability ClassifyUsability(
+        OperationalStatus status,
+        NetworkInterfaceType type,
+        long speed,
+        string? description,
+        string? name)
+    {
+        // 镜像接口：与父网卡字节计数重复，选中必致流量翻倍 ⇒ 永不可用（不可恢复）。
+        if (NetworkMonitor.IsFilterMirror(description, name))
+            return NicUsability.PermanentlyUnavailable;
+
+        // 未连接：可恢复 ⇒ 已选时补回并标「（未连接）」。
+        if (status != OperationalStatus.Up)
+            return NicUsability.Disconnected;
+
+        // 已连接但采集不到（speed ≤ 0 或类型不符）：不可标「未连接」（与事实不符）。
+        if (speed <= 0 || type is not (NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211))
+            return NicUsability.NotCollectable;
+
+        return NicUsability.Effective;
     }
 
     private static ChoiceSetSetting.Choice BuildChoice(

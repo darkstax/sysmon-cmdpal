@@ -181,10 +181,10 @@ public class NetworkInterfaceClassifierTests
         // 修复后这些不得出现在选项里。
         List<NicChoiceSource> mixed =
         [
-            new(GuidHw1, "以太网", "Realtek PCIe GbE Family Controller", NicClassification.PhysicalHardware, IsEffective: true),
-            new(GuidGone, "本地连接* 3", "WAN Miniport (SSTP)", NicClassification.Virtual, IsEffective: false),
-            new(GuidVirt, "tun0", "sing-tun Tunnel", NicClassification.Virtual, IsEffective: false),
-            new(GuidHw2, "WLAN", "Intel(R) Wi-Fi 6E AX210 160MHz", NicClassification.PhysicalHardware, IsEffective: false),
+            new(GuidHw1, "以太网", "Realtek PCIe GbE Family Controller", NicClassification.PhysicalHardware, NicUsability.Effective),
+            new(GuidGone, "本地连接* 3", "WAN Miniport (SSTP)", NicClassification.Virtual, NicUsability.Disconnected),
+            new(GuidVirt, "tun0", "sing-tun Tunnel", NicClassification.Virtual, NicUsability.Disconnected),
+            new(GuidHw2, "WLAN", "Intel(R) Wi-Fi 6E AX210 160MHz", NicClassification.PhysicalHardware, NicUsability.NotCollectable),
         ];
 
         var choices = NetworkInterfaceClassifier.BuildNicChoices(mixed, KindLabel, "自动（推荐）");
@@ -203,7 +203,7 @@ public class NetworkInterfaceClassifierTests
         // 极端：没有任何可生效接口 ⇒ 只剩 auto（用户至少能看到"自动"）
         List<NicChoiceSource> noneEffective =
         [
-            new(GuidVirt, "tun0", "sing-tun Tunnel", NicClassification.Virtual, IsEffective: false),
+            new(GuidVirt, "tun0", "sing-tun Tunnel", NicClassification.Virtual, NicUsability.Disconnected),
         ];
 
         var choices = NetworkInterfaceClassifier.BuildNicChoices(noneEffective, KindLabel, "自动（推荐）");
@@ -213,11 +213,11 @@ public class NetworkInterfaceClassifierTests
     }
 
     [Fact]
-    public void F2_DefaultIsEffective_BackwardCompatible()
+    public void F2_DefaultUsability_IsEffective_BackwardCompatible()
     {
-        // IsEffective 默认 true：既有构造点（未显式传参）行为不变
+        // Usability 默认 Effective：既有构造点（未显式传参）行为不变
         var src = new NicChoiceSource(GuidHw1, "以太网", "Realtek", NicClassification.PhysicalHardware);
-        Assert.True(src.IsEffective);
+        Assert.Equal(NicUsability.Effective, src.Usability);
     }
 
     [Fact]
@@ -226,7 +226,7 @@ public class NetworkInterfaceClassifierTests
         // 已选网卡在系统里彻底不存在（拔出/卸载驱动）⇒ 选项里没有它 ⇒ 收敛回 auto。
         List<NicChoiceSource> onlyOther =
         [
-            new(GuidHw1, "以太网", "Realtek PCIe GbE Family Controller", NicClassification.PhysicalHardware, IsEffective: true),
+            new(GuidHw1, "以太网", "Realtek PCIe GbE Family Controller", NicClassification.PhysicalHardware, NicUsability.Effective),
         ];
 
         var choices = NetworkInterfaceClassifier.BuildNicChoices(onlyOther, KindLabel, "自动");
@@ -241,14 +241,14 @@ public class NetworkInterfaceClassifierTests
         // 静默重置成 auto —— 用户明明只想监控那张卡，一次短暂断连就永久丢失意图。
         List<NicChoiceSource> nics =
         [
-            new(GuidHw1, "以太网", "Realtek PCIe GbE Family Controller", NicClassification.PhysicalHardware, IsEffective: true),
-            new(GuidHw2, "WLAN", "Intel(R) Wi-Fi 6E AX210 160MHz", NicClassification.PhysicalHardware, IsEffective: false),
+            new(GuidHw1, "以太网", "Realtek PCIe GbE Family Controller", NicClassification.PhysicalHardware, NicUsability.Effective),
+            new(GuidHw2, "WLAN", "Intel(R) Wi-Fi 6E AX210 160MHz", NicClassification.PhysicalHardware, NicUsability.Disconnected),
         ];
 
         var choices = NetworkInterfaceClassifier.BuildNicChoices(
             nics, KindLabel, "自动", currentValue: GuidHw2, unavailableSuffix: "（未连接）");
 
-        // 不可生效但已选 ⇒ 补回列表并标注
+        // 临时断连但已选 ⇒ 补回列表并标注
         Assert.Contains(choices, c => c.Value == GuidHw2);
         Assert.Contains(choices, c => c.Value == GuidHw2 && c.Title.Contains("（未连接）"));
 
@@ -262,8 +262,8 @@ public class NetworkInterfaceClassifierTests
         // 不可生效且未被选中 ⇒ 不补进列表（否则又回到"列一堆 no-op"的老问题）
         List<NicChoiceSource> nics =
         [
-            new(GuidHw1, "以太网", "Realtek", NicClassification.PhysicalHardware, IsEffective: true),
-            new(GuidVirt, "tun0", "sing-tun Tunnel", NicClassification.Virtual, IsEffective: false),
+            new(GuidHw1, "以太网", "Realtek", NicClassification.PhysicalHardware, NicUsability.Effective),
+            new(GuidVirt, "tun0", "sing-tun Tunnel", NicClassification.Virtual, NicUsability.Disconnected),
         ];
 
         var choices = NetworkInterfaceClassifier.BuildNicChoices(
@@ -279,14 +279,95 @@ public class NetworkInterfaceClassifierTests
         // 不传 currentValue（既有调用形态）⇒ 行为与纯过滤一致
         List<NicChoiceSource> nics =
         [
-            new(GuidHw1, "以太网", "Realtek", NicClassification.PhysicalHardware, IsEffective: true),
-            new(GuidHw2, "WLAN", "Intel", NicClassification.PhysicalHardware, IsEffective: false),
+            new(GuidHw1, "以太网", "Realtek", NicClassification.PhysicalHardware, NicUsability.Effective),
+            new(GuidHw2, "WLAN", "Intel", NicClassification.PhysicalHardware, NicUsability.Disconnected),
         ];
 
         var choices = NetworkInterfaceClassifier.BuildNicChoices(nics, KindLabel, "自动");
 
         Assert.Equal(2, choices.Count);
         Assert.DoesNotContain(choices, c => c.Value == GuidHw2);
+    }
+
+    // ================================================================
+    // F2 round-3 回归（t3 round-3 finding）：补回条件必须区分不可用原因
+    // ================================================================
+
+    [Fact]
+    public void Round3_SelectedMirror_IsNotReAddedAndConvergesToAuto()
+    {
+        // 回归（round-3）：修复前补回条件只判 !IsEffective && selected.Contains(id)，
+        // 没有镜像闸 ⇒ 已选的**镜像**接口会被补回列表并保住 ⇒ 用户又能选中它 ⇒
+        // 与父网卡字节重复、流量翻倍。镜像永不可用，必须不补回并收敛为 auto。
+        List<NicChoiceSource> nics =
+        [
+            new(GuidHw1, "以太网", "Realtek PCIe GbE Family Controller", NicClassification.PhysicalHardware, NicUsability.Effective),
+            new(GuidGone, "以太网-Kaspersky Lab NDIS 6 Filter-0000",
+                "Realtek PCIe GbE Family Controller-Kaspersky Lab NDIS 6 Filter-0000",
+                NicClassification.Unknown, NicUsability.PermanentlyUnavailable),
+        ];
+
+        var choices = NetworkInterfaceClassifier.BuildNicChoices(
+            nics, KindLabel, "自动", currentValue: GuidGone, unavailableSuffix: "（未连接）");
+
+        // 不补回
+        Assert.DoesNotContain(choices, c => c.Value == GuidGone);
+        // 且不因"补回"而保住选择值 ⇒ 收敛为 auto
+        Assert.Equal("auto", NetworkInterfaceClassifier.ResolveNicSelection(GuidGone, choices, "auto"));
+    }
+
+    [Fact]
+    public void Round3_SelectedUpButZeroSpeed_IsNotLabeledDisconnected()
+    {
+        // 回归（round-3）：接口是 Up 的、只是 speed ≤ 0（采集不到），
+        // 标「（未连接）」与事实不符 ⇒ 不补回、不标注，收敛为 auto。
+        List<NicChoiceSource> nics =
+        [
+            new(GuidHw1, "以太网", "Realtek PCIe GbE Family Controller", NicClassification.PhysicalHardware, NicUsability.Effective),
+            new(GuidHw2, "WLAN", "Intel(R) Wi-Fi 6E AX210 160MHz", NicClassification.PhysicalHardware, NicUsability.NotCollectable),
+        ];
+
+        var choices = NetworkInterfaceClassifier.BuildNicChoices(
+            nics, KindLabel, "自动", currentValue: GuidHw2, unavailableSuffix: "（未连接）");
+
+        Assert.DoesNotContain(choices, c => c.Value == GuidHw2);
+        Assert.DoesNotContain(choices, c => c.Title.Contains("（未连接）"));
+        Assert.Equal("auto", NetworkInterfaceClassifier.ResolveNicSelection(GuidHw2, choices, "auto"));
+    }
+
+    [Theory]
+    // 镜像优先于一切：即便 Up + 有速度，也必须判 PermanentlyUnavailable（不可恢复）
+    [InlineData(OperationalStatus.Up, NetworkInterfaceType.Ethernet, 1_000_000_000L,
+        "Realtek PCIe GbE Family Controller-Kaspersky Lab NDIS 6 Filter-0000",
+        "以太网-Kaspersky Lab NDIS 6 Filter-0000", NicUsability.PermanentlyUnavailable)]
+    [InlineData(OperationalStatus.Up, NetworkInterfaceType.Ethernet, 1_000_000_000L,
+        "Hyper-V Virtual Switch Extension Adapter",
+        "vSwitch (Default Switch)-Virtual Switch Extension Filter-0000", NicUsability.PermanentlyUnavailable)]
+    // 未连接 ⇒ 可恢复（即便 speed 是 -1）
+    [InlineData(OperationalStatus.Down, NetworkInterfaceType.Wireless80211, -1L,
+        "Intel(R) Wi-Fi 6E AX210 160MHz", "WLAN", NicUsability.Disconnected)]
+    [InlineData(OperationalStatus.NotPresent, NetworkInterfaceType.Ethernet, 0L,
+        "WAN Miniport (SSTP)", "本地连接* 3", NicUsability.Disconnected)]
+    // 已连接但采集不到 ⇒ NotCollectable（不得标"未连接"）
+    [InlineData(OperationalStatus.Up, NetworkInterfaceType.Ethernet, 0L,
+        "Some Adapter", "Ethernet 2", NicUsability.NotCollectable)]
+    [InlineData(OperationalStatus.Up, NetworkInterfaceType.Tunnel, 1_000_000_000L,
+        "Some Tunnel", "tun0", NicUsability.NotCollectable)]
+    // 正常可生效
+    [InlineData(OperationalStatus.Up, NetworkInterfaceType.Ethernet, 1_000_000_000L,
+        "Realtek PCIe GbE Family Controller", "以太网", NicUsability.Effective)]
+    [InlineData(OperationalStatus.Up, NetworkInterfaceType.Wireless80211, 1_000_000_000L,
+        "Intel(R) Wi-Fi 6E AX210 160MHz", "WLAN", NicUsability.Effective)]
+    public void Round3_ClassifyUsability_PrioritizesMirrorOverRecoverable(
+        OperationalStatus status,
+        NetworkInterfaceType type,
+        long speed,
+        string description,
+        string name,
+        NicUsability expected)
+    {
+        Assert.Equal(expected, NetworkInterfaceClassifier.ClassifyUsability(
+            status, type, speed, description, name));
     }
 
     // ================================================================

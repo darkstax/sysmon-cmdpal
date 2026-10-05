@@ -173,7 +173,7 @@ internal sealed partial class SysMonSettingsManager : JsonSettingsManager, IComm
 
     /// <summary>
     /// 枚举接口并分类（不触碰真实网络流量，只读属性 + 注册表绑定表）。
-    /// IsEffective 决定该接口是否出现在设置页选项里 —— 见 BuildNicChoices 的说明。
+    /// Usability 决定该接口是否列入选项、已选时是否补回 —— 见 BuildNicChoices 的说明。
     /// </summary>
     private static List<NicChoiceSource> EnumerateNicChoices()
     {
@@ -192,18 +192,18 @@ internal sealed partial class SysMonSettingsManager : JsonSettingsManager, IComm
                 pnp = null;
             }
 
-            // 可生效 = 过硬门槛（Up + Ethernet/Wireless80211 + speed > 0）且非过滤器镜像。
-            // 镜像排除是防流量翻倍的最后防线（与 NetworkMonitor.SelectInterfaceIds 一致）。
-            bool effective = NetworkMonitor.PassesHardGate(
-                    ni.OperationalStatus, ni.NetworkInterfaceType, ni.Speed)
-                && !NetworkMonitor.IsFilterMirror(ni.Description, ni.Name);
+            // 可用性判据集中在 NetworkInterfaceClassifier.ClassifyUsability
+            // （唯一来源，与 NetworkMonitor 的镜像闸一致）。
+            var usability = NetworkInterfaceClassifier.ClassifyUsability(
+                ni.OperationalStatus, ni.NetworkInterfaceType, ni.Speed,
+                ni.Description, ni.Name);
 
             result.Add(new NicChoiceSource(
                 ni.Id,
                 ni.Name,
                 ni.Description,
                 NetworkInterfaceClassifier.ClassifyPnpInstanceId(pnp),
-                effective));
+                usability));
         }
 
         return result;
