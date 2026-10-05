@@ -204,7 +204,7 @@ try {
     $action = New-ScheduledTaskAction -Execute $TargetExe -WorkingDirectory $TargetDirectory
     $trigger = New-ScheduledTaskTrigger -AtLogOn
     # 以当前用户运行(非 SYSTEM): 白名单 LOCALAPPDATA 与客户端一致(btop4win-broker-ipc.md §2.5)
-    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -RunLevel Highest -LogonType InteractiveToken
+    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -RunLevel Highest -LogonType Interactive
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) `
@@ -222,7 +222,7 @@ try {
     $registeredTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
     if ((Test-IsSystemPrincipal ([string]$registeredTask.Principal.UserId)) -or
         $registeredTask.Principal.RunLevel.ToString() -ne "Highest" -or
-        $registeredTask.Principal.LogonType.ToString() -ne "InteractiveToken") {
+        $registeredTask.Principal.LogonType.ToString() -ne "Interactive") {
         throw "The development Broker task principal validation failed."
     }
 
