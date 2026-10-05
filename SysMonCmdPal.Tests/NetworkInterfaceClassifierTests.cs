@@ -213,7 +213,7 @@ public class NetworkInterfaceClassifierTests
     }
 
     [Fact]
-    public void F2_DefaultUsability_IsEffective_BackwardCompatible()
+    public void F2_DefaultUsability_IsEffectiveBackwardCompatible()
     {
         // Usability 默认 Effective：既有构造点（未显式传参）行为不变
         var src = new NicChoiceSource(GuidHw1, "以太网", "Realtek", NicClassification.PhysicalHardware);
