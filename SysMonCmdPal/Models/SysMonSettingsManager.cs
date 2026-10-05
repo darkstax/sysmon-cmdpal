@@ -150,12 +150,13 @@ internal sealed partial class SysMonSettingsManager : JsonSettingsManager, IComm
         var choices = NetworkInterfaceClassifier.BuildNicChoices(
             EnumerateNicChoices(),
             GetNicKindLabel,
-            Loc.Get("Settings.NicAutoChoice"));
+            Loc.Get("Settings.NicAutoChoice"),
+            _nicSelectionSetting.Value,
+            Loc.Get("Settings.NicUnavailableSuffix"));
 
-        // 已选网卡全部失效（拔出/卸载驱动）⇒ 收敛回 auto，避免速度恒为 0。
-        // 注意：这里用"选择值是否仍在 Choices 里"判断，而 Choices 只含可生效接口 ⇒
-        // 已选网卡临时 Down 时也会回退 auto。这是刻意的：Down 的网卡采集不到流量，
-        // 保留它只会让用户看到 0 B/s（与"网络坏了"无法区分）。
+        // 已选网卡在系统里彻底不存在（拔出/卸载驱动）⇒ 收敛回 auto，避免速度恒为 0。
+        // 注意：临时 Down 的已选网卡被 BuildNicChoices 以"未连接"标注补回列表，
+        // 故不会被误判为消失、不会丢掉用户的选择（见该方法的说明）。
         var resolved = NetworkInterfaceClassifier.ResolveNicSelection(
             _nicSelectionSetting.Value,
             choices,

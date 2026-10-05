@@ -204,11 +204,18 @@ internal static class NetworkInterfaceClassifier
     /// + speed &gt; 0），其余 45 个（NotPresent 的 WAN Miniport、Down 的 filter 镜像等）
     /// 选中后是静默 no-op —— 用户以为选了、实际不生效，是纯粹的误导。
     /// 镜像接口也一并排除（选中必然导致流量翻倍，见 NetworkMonitor.IsFilterMirror）。
+    ///
+    /// <paramref name="currentValue"/> 例外：用户**已选**但当前不可生效的接口（如临时 Down）
+    /// 会以"未连接"标注补回列表。若不补，它会被判为"已消失"而把用户的选择静默重置成 auto ——
+    /// 用户明明只是想监控某张卡，一次短暂断连就永久丢失该意图。
+    /// 只有 GUID 在系统里彻底不存在（拔出/卸载驱动）时才真的回退 auto。
     /// </summary>
     internal static List<ChoiceSetSetting.Choice> BuildNicChoices(
         IReadOnlyList<NicChoiceSource> interfaces,
         Func<NicClassification, string> kindLabel,
-        string autoTitle)
+        string autoTitle,
+        string? currentValue = null,
+        string unavailableSuffix = "")
     {
         var choices = new List<ChoiceSetSetting.Choice>
         {
@@ -220,16 +227,34 @@ internal static class NetworkInterfaceClassifier
             .OrderBy(i => KindRank(i.Classification))
             .ThenBy(i => i.Name, StringComparer.CurrentCultureIgnoreCase))
         {
-            string kind = kindLabel(nic.Classification);
-            string description = Truncate(nic.Description, 40);
-            string title = string.IsNullOrWhiteSpace(description)
-                ? $"{nic.Name} — {kind}"
-                : $"{nic.Name} — {kind} — {description}";
+            choices.Add(BuildChoice(nic, kindLabel, suffix: ""));
+        }
 
-            choices.Add(new ChoiceSetSetting.Choice(title, nic.Id));
+        // 已选但不可生效的接口：补回列表并标注，保住用户的选择意图。
+        var selected = ParseSelectedGuids(currentValue);
+        foreach (var nic in interfaces)
+        {
+            if (nic.IsEffective || !selected.Contains(nic.Id))
+                continue;
+
+            choices.Add(BuildChoice(nic, kindLabel, suffix: unavailableSuffix));
         }
 
         return choices;
+    }
+
+    private static ChoiceSetSetting.Choice BuildChoice(
+        NicChoiceSource nic,
+        Func<NicClassification, string> kindLabel,
+        string suffix)
+    {
+        string kind = kindLabel(nic.Classification) + suffix;
+        string description = Truncate(nic.Description, 40);
+        string title = string.IsNullOrWhiteSpace(description)
+            ? $"{nic.Name} — {kind}"
+            : $"{nic.Name} — {kind} — {description}";
+
+        return new ChoiceSetSetting.Choice(title, nic.Id);
     }
 
     /// <summary>

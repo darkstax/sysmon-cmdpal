@@ -793,6 +793,9 @@ No battery detected (desktop or virtual machine).</value>
   <data name="Settings.NicKindVirtual" xml:space="preserve">
     <value>Virtual</value>
   </data>
+  <data name="Settings.NicUnavailableSuffix" xml:space="preserve">
+    <value> (not connected)</value>
+  </data>
   <data name="Settings.NicKindUnknown" xml:space="preserve">
     <value>Unidentified</value>
   </data>

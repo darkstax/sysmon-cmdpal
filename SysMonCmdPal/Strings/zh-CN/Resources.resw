@@ -793,6 +793,9 @@
   <data name="Settings.NicKindVirtual" xml:space="preserve">
     <value>虚拟</value>
   </data>
+  <data name="Settings.NicUnavailableSuffix" xml:space="preserve">
+    <value>（未连接）</value>
+  </data>
   <data name="Settings.NicKindUnknown" xml:space="preserve">
     <value>未识别</value>
   </data>

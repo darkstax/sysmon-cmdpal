@@ -223,8 +223,7 @@ public class NetworkInterfaceClassifierTests
     [Fact]
     public void F2_NonEffectiveSelectedNic_FallsBackToAuto()
     {
-        // 已选网卡变得不可生效（如临时 Down）⇒ 选项里没有它 ⇒ 收敛回 auto。
-        // 这是刻意的：Down 的网卡采集不到流量，保留只会让用户看到 0 B/s。
+        // 已选网卡在系统里彻底不存在（拔出/卸载驱动）⇒ 选项里没有它 ⇒ 收敛回 auto。
         List<NicChoiceSource> onlyOther =
         [
             new(GuidHw1, "以太网", "Realtek PCIe GbE Family Controller", NicClassification.PhysicalHardware, IsEffective: true),
@@ -233,6 +232,61 @@ public class NetworkInterfaceClassifierTests
         var choices = NetworkInterfaceClassifier.BuildNicChoices(onlyOther, KindLabel, "自动");
 
         Assert.Equal("auto", NetworkInterfaceClassifier.ResolveNicSelection(GuidHw2, choices, "auto"));
+    }
+
+    [Fact]
+    public void F2_SelectedButTemporarilyDownNic_IsPreservedAndLabeled()
+    {
+        // 反回归：已选网卡只是临时 Down（仍在系统里）时，不得被判为"消失"而把用户选择
+        // 静默重置成 auto —— 用户明明只想监控那张卡，一次短暂断连就永久丢失意图。
+        List<NicChoiceSource> nics =
+        [
+            new(GuidHw1, "以太网", "Realtek PCIe GbE Family Controller", NicClassification.PhysicalHardware, IsEffective: true),
+            new(GuidHw2, "WLAN", "Intel(R) Wi-Fi 6E AX210 160MHz", NicClassification.PhysicalHardware, IsEffective: false),
+        ];
+
+        var choices = NetworkInterfaceClassifier.BuildNicChoices(
+            nics, KindLabel, "自动", currentValue: GuidHw2, unavailableSuffix: "（未连接）");
+
+        // 不可生效但已选 ⇒ 补回列表并标注
+        Assert.Contains(choices, c => c.Value == GuidHw2);
+        Assert.Contains(choices, c => c.Value == GuidHw2 && c.Title.Contains("（未连接）"));
+
+        // 因此不会被收敛掉 —— 用户的选择保住了
+        Assert.Equal(GuidHw2, NetworkInterfaceClassifier.ResolveNicSelection(GuidHw2, choices, "auto"));
+    }
+
+    [Fact]
+    public void F2_NonEffectiveNotSelected_IsNotAdded()
+    {
+        // 不可生效且未被选中 ⇒ 不补进列表（否则又回到"列一堆 no-op"的老问题）
+        List<NicChoiceSource> nics =
+        [
+            new(GuidHw1, "以太网", "Realtek", NicClassification.PhysicalHardware, IsEffective: true),
+            new(GuidVirt, "tun0", "sing-tun Tunnel", NicClassification.Virtual, IsEffective: false),
+        ];
+
+        var choices = NetworkInterfaceClassifier.BuildNicChoices(
+            nics, KindLabel, "自动", currentValue: GuidHw1, unavailableSuffix: "（未连接）");
+
+        Assert.Equal(2, choices.Count);   // auto + 可生效的 Hw1
+        Assert.DoesNotContain(choices, c => c.Value == GuidVirt);
+    }
+
+    [Fact]
+    public void F2_NoCurrentValue_BehavesAsBefore()
+    {
+        // 不传 currentValue（既有调用形态）⇒ 行为与纯过滤一致
+        List<NicChoiceSource> nics =
+        [
+            new(GuidHw1, "以太网", "Realtek", NicClassification.PhysicalHardware, IsEffective: true),
+            new(GuidHw2, "WLAN", "Intel", NicClassification.PhysicalHardware, IsEffective: false),
+        ];
+
+        var choices = NetworkInterfaceClassifier.BuildNicChoices(nics, KindLabel, "自动");
+
+        Assert.Equal(2, choices.Count);
+        Assert.DoesNotContain(choices, c => c.Value == GuidHw2);
     }
 
     // ================================================================
