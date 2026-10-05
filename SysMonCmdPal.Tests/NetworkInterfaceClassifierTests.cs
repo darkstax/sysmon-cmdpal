@@ -129,7 +129,7 @@ public class NetworkInterfaceClassifierTests
 
         Assert.Equal(NetworkInterfaceClassifier.AutoSelectionValue, choices[0].Value);
         Assert.Equal("自动（推荐）", choices[0].Title);
-        // 全部接口都在（用户需要看到虚拟接口才能纠正误判）
+        // 全部可生效接口都在（用户需要看到虚拟接口才能纠正误判）
         Assert.Equal(5, choices.Count);
     }
 
@@ -167,6 +167,72 @@ public class NetworkInterfaceClassifierTests
 
         // Choice.Value 必须是 NetworkInterface.Id，才能与手动选择集合匹配
         Assert.Contains(choices, c => c.Value == GuidHw1);
+    }
+
+    // ================================================================
+    // F2 回归（t3 审查）：只列可生效接口
+    // ================================================================
+
+    [Fact]
+    public void F2_BuildNicChoices_ExcludesNonEffectiveInterfaces()
+    {
+        // 回归（t3 F2）：宿主机实测 65 个接口里仅 20 个可生效，其余 45 个
+        // （NotPresent 的 WAN Miniport、Down 的 filter 镜像等）选中是静默 no-op。
+        // 修复后这些不得出现在选项里。
+        List<NicChoiceSource> mixed =
+        [
+            new(GuidHw1, "以太网", "Realtek PCIe GbE Family Controller", NicClassification.PhysicalHardware, IsEffective: true),
+            new(GuidGone, "本地连接* 3", "WAN Miniport (SSTP)", NicClassification.Virtual, IsEffective: false),
+            new(GuidVirt, "tun0", "sing-tun Tunnel", NicClassification.Virtual, IsEffective: false),
+            new(GuidHw2, "WLAN", "Intel(R) Wi-Fi 6E AX210 160MHz", NicClassification.PhysicalHardware, IsEffective: false),
+        ];
+
+        var choices = NetworkInterfaceClassifier.BuildNicChoices(mixed, KindLabel, "自动（推荐）");
+
+        // auto + 唯一可生效项
+        Assert.Equal(2, choices.Count);
+        Assert.Contains(choices, c => c.Value == GuidHw1);
+        Assert.DoesNotContain(choices, c => c.Value == GuidGone);
+        Assert.DoesNotContain(choices, c => c.Value == GuidVirt);
+        Assert.DoesNotContain(choices, c => c.Value == GuidHw2);
+    }
+
+    [Fact]
+    public void F2_BuildNicChoices_StillStartsWithAutoWhenNothingEffective()
+    {
+        // 极端：没有任何可生效接口 ⇒ 只剩 auto（用户至少能看到"自动"）
+        List<NicChoiceSource> noneEffective =
+        [
+            new(GuidVirt, "tun0", "sing-tun Tunnel", NicClassification.Virtual, IsEffective: false),
+        ];
+
+        var choices = NetworkInterfaceClassifier.BuildNicChoices(noneEffective, KindLabel, "自动（推荐）");
+
+        Assert.Single(choices);
+        Assert.Equal(NetworkInterfaceClassifier.AutoSelectionValue, choices[0].Value);
+    }
+
+    [Fact]
+    public void F2_DefaultIsEffective_BackwardCompatible()
+    {
+        // IsEffective 默认 true：既有构造点（未显式传参）行为不变
+        var src = new NicChoiceSource(GuidHw1, "以太网", "Realtek", NicClassification.PhysicalHardware);
+        Assert.True(src.IsEffective);
+    }
+
+    [Fact]
+    public void F2_NonEffectiveSelectedNic_FallsBackToAuto()
+    {
+        // 已选网卡变得不可生效（如临时 Down）⇒ 选项里没有它 ⇒ 收敛回 auto。
+        // 这是刻意的：Down 的网卡采集不到流量，保留只会让用户看到 0 B/s。
+        List<NicChoiceSource> onlyOther =
+        [
+            new(GuidHw1, "以太网", "Realtek PCIe GbE Family Controller", NicClassification.PhysicalHardware, IsEffective: true),
+        ];
+
+        var choices = NetworkInterfaceClassifier.BuildNicChoices(onlyOther, KindLabel, "自动");
+
+        Assert.Equal("auto", NetworkInterfaceClassifier.ResolveNicSelection(GuidHw2, choices, "auto"));
     }
 
     // ================================================================

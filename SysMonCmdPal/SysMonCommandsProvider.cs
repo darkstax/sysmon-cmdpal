@@ -35,10 +35,12 @@ public partial class SysMonCommandsProvider : CommandProvider
         Settings = _settingsManager;
 
         // 手动切换「主网卡」后失效接口缓存并重播种基线，避免沿用过期的接口集合。
+        // 只订阅网卡选择的**实际变化**（而非 Settings.SettingsChanged）—— 后者在保存
+        // 任意设置项时都触发，会让无关设置保存也重置网络基线。
         // 注意：这里不主动解析 SystemInfoService.Instance —— 那会把它提到 _rootPage 之前构造，
         // 而源实例化顺序是 PerformanceCounter 时序敏感的（见 SystemInfoService 注释）。
         // 改为事件触发时惰性取用。
-        _settingsManager.Settings.SettingsChanged += OnNicSelectionSettingsChanged;
+        _settingsManager.NicSelectionChanged += OnNicSelectionChanged;
 
         _rootPage = new SysMonMainPage();
         _rootCommand = new CommandItem(_rootPage)
@@ -92,14 +94,14 @@ public partial class SysMonCommandsProvider : CommandProvider
     public override void Dispose()
     {
         SensorDockSettings.Changed -= OnSensorDockSettingsChanged;
-        _settingsManager.Settings.SettingsChanged -= OnNicSelectionSettingsChanged;
+        _settingsManager.NicSelectionChanged -= OnNicSelectionChanged;
         _rootPage.Dispose();
         ReleaseSensorDockBands();
         DockBandRefreshCoordinator.Shutdown();
         base.Dispose();
     }
 
-    private void OnNicSelectionSettingsChanged(object? sender, Microsoft.CommandPalette.Extensions.Toolkit.Settings e)
+    private void OnNicSelectionChanged(object? sender, EventArgs e)
     {
         try { SystemInfoService.Instance.NetworkMonitorSource?.InvalidateNicSelection(); }
         catch { /* 失效失败不得影响设置保存 */ }

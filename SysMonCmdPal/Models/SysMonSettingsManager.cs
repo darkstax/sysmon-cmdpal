@@ -54,12 +54,42 @@ internal sealed partial class SysMonSettingsManager : JsonSettingsManager, IComm
 
         LoadSettings();
         RestorePersistedNicSelection();
-        Settings.SettingsChanged += (_, _) => SaveSettings();
+        _lastNicSelection = _nicSelectionSetting.Value;
+        Settings.SettingsChanged += OnSettingsChanged;
 
         _settingsPage = new SysMonSettingsContentPage(
             Settings,
             new BrokerInstallController(),
             RefreshNicChoices);
+    }
+
+    /// <summary>
+    /// 「主网卡」选择**实际发生变化**时触发。
+    ///
+    /// 为什么不直接让消费方订阅 <c>Settings.SettingsChanged</c>：那个事件在保存任意设置项
+    /// （如 btopPath）时都会触发，而失效处理会清空接口缓存并重新播种网络基线 ——
+    /// 保存无关设置却重置网络基线，会让速率读数出现无谓的跳变。
+    /// 这里只在本键值真的变了才通知。
+    /// </summary>
+    internal event EventHandler? NicSelectionChanged;
+
+    private string? _lastNicSelection;
+
+    private void OnSettingsChanged(object? sender, Microsoft.CommandPalette.Extensions.Toolkit.Settings e)
+    {
+        SaveSettings();
+        NotifyNicSelectionIfChanged();
+    }
+
+    /// <summary>对比当前值与上次已通知值，只有真正变化才触发 <see cref="NicSelectionChanged"/>。</summary>
+    private void NotifyNicSelectionIfChanged()
+    {
+        var current = _nicSelectionSetting.Value;
+        if (string.Equals(current, _lastNicSelection, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        _lastNicSelection = current;
+        NicSelectionChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public IContentPage SettingsPage => _settingsPage;
@@ -123,6 +153,9 @@ internal sealed partial class SysMonSettingsManager : JsonSettingsManager, IComm
             Loc.Get("Settings.NicAutoChoice"));
 
         // 已选网卡全部失效（拔出/卸载驱动）⇒ 收敛回 auto，避免速度恒为 0。
+        // 注意：这里用"选择值是否仍在 Choices 里"判断，而 Choices 只含可生效接口 ⇒
+        // 已选网卡临时 Down 时也会回退 auto。这是刻意的：Down 的网卡采集不到流量，
+        // 保留它只会让用户看到 0 B/s（与"网络坏了"无法区分）。
         var resolved = NetworkInterfaceClassifier.ResolveNicSelection(
             _nicSelectionSetting.Value,
             choices,
@@ -130,9 +163,17 @@ internal sealed partial class SysMonSettingsManager : JsonSettingsManager, IComm
 
         _nicSelectionSetting.Choices = choices;
         _nicSelectionSetting.Value = resolved;
+
+        // 同步"上次已通知值"：本方法可能在网卡消失时把值收敛回 auto，
+        // 若不更新，之后保存任意无关设置都会误判为"网卡选择变了"而重置网络基线
+        // （正是 F3 要避免的那类无谓失效）。
+        _lastNicSelection = resolved;
     }
 
-    /// <summary>枚举全部接口并分类（不触碰真实网络流量，只读属性 + 注册表绑定表）。</summary>
+    /// <summary>
+    /// 枚举接口并分类（不触碰真实网络流量，只读属性 + 注册表绑定表）。
+    /// IsEffective 决定该接口是否出现在设置页选项里 —— 见 BuildNicChoices 的说明。
+    /// </summary>
     private static List<NicChoiceSource> EnumerateNicChoices()
     {
         var result = new List<NicChoiceSource>();
@@ -150,11 +191,18 @@ internal sealed partial class SysMonSettingsManager : JsonSettingsManager, IComm
                 pnp = null;
             }
 
+            // 可生效 = 过硬门槛（Up + Ethernet/Wireless80211 + speed > 0）且非过滤器镜像。
+            // 镜像排除是防流量翻倍的最后防线（与 NetworkMonitor.SelectInterfaceIds 一致）。
+            bool effective = NetworkMonitor.PassesHardGate(
+                    ni.OperationalStatus, ni.NetworkInterfaceType, ni.Speed)
+                && !NetworkMonitor.IsFilterMirror(ni.Description, ni.Name);
+
             result.Add(new NicChoiceSource(
                 ni.Id,
                 ni.Name,
                 ni.Description,
-                NetworkInterfaceClassifier.ClassifyPnpInstanceId(pnp)));
+                NetworkInterfaceClassifier.ClassifyPnpInstanceId(pnp),
+                effective));
         }
 
         return result;

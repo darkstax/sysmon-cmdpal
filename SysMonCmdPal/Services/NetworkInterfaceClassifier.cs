@@ -46,11 +46,16 @@ internal readonly record struct NicCandidate(
     NicClassification Classification);
 
 /// <summary>设置页选择项的数据源（脱离 NetworkInterface 对象，便于纯函数单测）。</summary>
+/// <param name="IsEffective">
+/// 选中后是否真的会生效（过硬门槛且非过滤器镜像）。设置页只列可生效接口 ——
+/// 宿主机实测 65 个接口里仅 20 个可生效，其余 45 个选中是静默 no-op。
+/// </param>
 internal readonly record struct NicChoiceSource(
     string Id,
     string Name,
     string Description,
-    NicClassification Classification);
+    NicClassification Classification,
+    bool IsEffective = true);
 
 /// <summary>注册表绑定表读取接缝：生产 = HKLM 只读；测试 = fixture 字典注入。</summary>
 internal interface INicBindingProvider
@@ -192,7 +197,14 @@ internal static class NetworkInterfaceClassifier
         return result;
     }
 
-    /// <summary>设置页枚举：全部接口 + 类型标注，硬件在前、虚拟在后，首项恒为「自动」。</summary>
+    /// <summary>
+    /// 设置页枚举：只列**可生效**的接口 + 类型标注，硬件在前、虚拟在后，首项恒为「自动」。
+    ///
+    /// 为什么过滤：宿主机实测 65 个接口里只有 20 个过硬门槛（Up + Ethernet/Wireless80211
+    /// + speed &gt; 0），其余 45 个（NotPresent 的 WAN Miniport、Down 的 filter 镜像等）
+    /// 选中后是静默 no-op —— 用户以为选了、实际不生效，是纯粹的误导。
+    /// 镜像接口也一并排除（选中必然导致流量翻倍，见 NetworkMonitor.IsFilterMirror）。
+    /// </summary>
     internal static List<ChoiceSetSetting.Choice> BuildNicChoices(
         IReadOnlyList<NicChoiceSource> interfaces,
         Func<NicClassification, string> kindLabel,
@@ -204,6 +216,7 @@ internal static class NetworkInterfaceClassifier
         };
 
         foreach (var nic in interfaces
+            .Where(i => i.IsEffective)
             .OrderBy(i => KindRank(i.Classification))
             .ThenBy(i => i.Name, StringComparer.CurrentCultureIgnoreCase))
         {

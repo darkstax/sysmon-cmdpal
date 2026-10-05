@@ -282,4 +282,139 @@ public class SysMonSettingsManagerTests
             try { File.Delete(path); } catch { }
         }
     }
+
+    // ================================================================
+    // F3 回归（t3 审查）：无关设置变更不得触发网卡失效
+    // ================================================================
+
+    /// <summary>触发 Settings 的 SettingsChanged（CmdPal 在表单提交时调用）。</summary>
+    private static void RaiseSettingsChanged(SysMonSettingsManager manager)
+    {
+        var method = manager.Settings.GetType().GetMethod(
+            "RaiseSettingsChanged",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        method.Invoke(manager.Settings, null);
+    }
+
+    private static void ApplySetting(SysMonSettingsManager manager, string json)
+        => manager.Settings.Update(json);
+
+    [Fact]
+    public void F3_UnrelatedSettingChange_DoesNotFireNicSelectionChanged()
+    {
+        // 回归（t3 F3）：修复前订阅 Settings.SettingsChanged，保存 btopPath 等无关设置
+        // 也会触发 InvalidateNicSelection() → Seed()，无谓重置网络基线。
+        var realPath = SensorChainConfig.ConfigPath;
+        string path = Path.Combine(Path.GetTempPath(), $"sysmon_f3a_{Guid.NewGuid():N}.json");
+        try
+        {
+            SensorChainConfig.ConfigPath = path;
+            var manager = new SysMonSettingsManager();
+            manager.RefreshNicChoices();
+
+            int fired = 0;
+            manager.NicSelectionChanged += (_, _) => fired++;
+
+            ApplySetting(manager, @"{""btopPath"":""C:\\btop.exe""}");
+            RaiseSettingsChanged(manager);
+
+            Assert.Equal(0, fired);
+        }
+        finally
+        {
+            SensorChainConfig.ConfigPath = realPath;
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [Fact]
+    public void F3_ActualNicSelectionChange_DoesFireNicSelectionChanged()
+    {
+        // 反向守卫：真正改了网卡选择必须触发失效（否则新选择不生效）
+        var realPath = SensorChainConfig.ConfigPath;
+        string path = Path.Combine(Path.GetTempPath(), $"sysmon_f3b_{Guid.NewGuid():N}.json");
+        try
+        {
+            SensorChainConfig.ConfigPath = path;
+            var manager = new SysMonSettingsManager();
+            manager.RefreshNicChoices();
+
+            int fired = 0;
+            manager.NicSelectionChanged += (_, _) => fired++;
+
+            // 直接改设置项值后触发（模拟表单提交）
+            const string nicGuid = "{A844F74B-BAB2-459B-9EC8-922D56E146EC}";
+            manager.NicSelectionSetting.Value = nicGuid;
+            RaiseSettingsChanged(manager);
+
+            Assert.Equal(1, fired);
+        }
+        finally
+        {
+            SensorChainConfig.ConfigPath = realPath;
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [Fact]
+    public void F3_SameNicValueAgain_DoesNotRefire()
+    {
+        // 幂等：反复保存同一个网卡值不得重复重置基线
+        var realPath = SensorChainConfig.ConfigPath;
+        string path = Path.Combine(Path.GetTempPath(), $"sysmon_f3c_{Guid.NewGuid():N}.json");
+        try
+        {
+            SensorChainConfig.ConfigPath = path;
+            var manager = new SysMonSettingsManager();
+            manager.RefreshNicChoices();
+
+            int fired = 0;
+            manager.NicSelectionChanged += (_, _) => fired++;
+
+            const string nicGuid = "{A844F74B-BAB2-459B-9EC8-922D56E146EC}";
+            manager.NicSelectionSetting.Value = nicGuid;
+            RaiseSettingsChanged(manager);
+            RaiseSettingsChanged(manager);
+            RaiseSettingsChanged(manager);
+
+            Assert.Equal(1, fired);
+        }
+        finally
+        {
+            SensorChainConfig.ConfigPath = realPath;
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [Fact]
+    public void F3_RefreshNicChoicesSyncsBaseline_NoSpuriousEventAfterwards()
+    {
+        // RefreshNicChoices 在网卡消失时会把值收敛回 auto。
+        // 若不同步"上次已通知值"，之后保存任意无关设置都会误判为网卡变化而重置基线。
+        var realPath = SensorChainConfig.ConfigPath;
+        string path = Path.Combine(Path.GetTempPath(), $"sysmon_f3d_{Guid.NewGuid():N}.json");
+        try
+        {
+            SensorChainConfig.ConfigPath = path;
+            // 持久一个不存在的 GUID（真实接口枚举里没有它）
+            File.WriteAllText(path,
+                @"{""selectedNicGuids"":""{11111111-2222-3333-4444-555555555555}""}");
+
+            var manager = new SysMonSettingsManager();
+            manager.RefreshNicChoices();   // 收敛回 auto，并同步基线
+
+            int fired = 0;
+            manager.NicSelectionChanged += (_, _) => fired++;
+
+            ApplySetting(manager, @"{""btopPath"":""C:\\btop.exe""}");
+            RaiseSettingsChanged(manager);
+
+            Assert.Equal(0, fired);
+        }
+        finally
+        {
+            SensorChainConfig.ConfigPath = realPath;
+            try { File.Delete(path); } catch { }
+        }
+    }
 }

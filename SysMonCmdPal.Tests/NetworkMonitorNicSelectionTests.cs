@@ -273,6 +273,80 @@ public class NetworkMonitorNicSelectionTests
         Assert.Equal([HwEthernetGuid], selected);
     }
 
+    // ================================================================
+    // F1 回归（t3 审查）：手动路径不得绕过镜像闸（防流量翻倍）
+    // ================================================================
+
+    /// <summary>
+    /// 构造"描述继承父网卡 + 镜像后缀"的候选，且分类被**误判成 PhysicalHardware** ——
+    /// 这正是白名单会放行、必须靠镜像闸拦下的最坏形态。
+    /// </summary>
+    private static NicCandidate MirrorAsHardware() => new(
+        KasperskyMirrorGuid, OperationalStatus.Up, NetworkInterfaceType.Ethernet,
+        "Realtek PCIe GbE Family Controller-Kaspersky Lab NDIS 6 Filter-0000",
+        "以太网-Kaspersky Lab NDIS 6 Filter-0000", Gbe,
+        NicClassification.PhysicalHardware);
+
+    [Fact]
+    public void F1_ManualSelectionOfParentAndMirror_KeepsOnlyParent()
+    {
+        // 回归（t3 F1）：settings.json 写 {父网卡};{Kaspersky镜像} 双 GUID 时，
+        // 修复前手动分支只校验硬门槛 ⇒ 返回 2 张接口 ⇒ 字节双计、流量翻倍。
+        // 修复后镜像必须被排除，只保留父网卡。
+        var selected = NetworkMonitor.SelectInterfaceIds(
+            [HwEthernet(), MirrorAsHardware()],
+            Select(HwEthernetGuid, KasperskyMirrorGuid));
+
+        Assert.Equal([HwEthernetGuid], selected);
+    }
+
+    [Fact]
+    public void F1_ManualSelectionOfMirrorOnly_NeverReturnsMirror()
+    {
+        // 只选镜像 ⇒ 手动集合全被镜像闸拒 ⇒ 回退自动判定（而非返回镜像）。
+        // 关键不变量：镜像**永远**不出现在结果里。
+        var selected = NetworkMonitor.SelectInterfaceIds(
+            [HwEthernet(), MirrorAsHardware()],
+            Select(KasperskyMirrorGuid));
+
+        Assert.DoesNotContain(KasperskyMirrorGuid, selected);
+        Assert.Equal([HwEthernetGuid], selected);
+    }
+
+    [Theory]
+    [InlineData("Realtek PCIe GbE Family Controller-Kaspersky Lab NDIS 6 Filter-0000", "以太网-Kaspersky Lab NDIS 6 Filter-0000")]
+    [InlineData("Realtek PCIe GbE Family Controller-WFP Native MAC Layer LightWeight Filter-0000", "以太网-WFP Native MAC Layer LightWeight Filter-0000")]
+    [InlineData("Intel(R) Wi-Fi 6E AX210 160MHz-Native WiFi Filter Driver-0000", "WLAN-Native WiFi Filter Driver-0000")]
+    [InlineData("Hyper-V Virtual Switch Extension Adapter", "vSwitch (Default Switch)-Virtual Switch Extension Filter-0000")]
+    [InlineData("Realtek PCIe GbE Family Controller-QoS Packet Scheduler-0000", "以太网-QoS Packet Scheduler-0000")]
+    public void F1_IsFilterMirror_DetectsAllMirrorTokens(string description, string name)
+    {
+        Assert.True(NetworkMonitor.IsFilterMirror(description, name));
+    }
+
+    [Fact]
+    public void F1_IsFilterMirror_DoesNotFlagRealHardware()
+    {
+        // 反向守卫：真硬件描述不得被判镜像（否则自动与手动路径都会误杀真网卡）
+        Assert.False(NetworkMonitor.IsFilterMirror("Realtek PCIe GbE Family Controller", "以太网"));
+        Assert.False(NetworkMonitor.IsFilterMirror("Intel(R) Wi-Fi 6E AX210 160MHz", "WLAN"));
+        Assert.False(NetworkMonitor.IsFilterMirror("Remote NDIS Compatible Device", "以太网 2"));
+        Assert.False(NetworkMonitor.IsFilterMirror(null, null));
+        Assert.False(NetworkMonitor.IsFilterMirror("", ""));
+    }
+
+    [Fact]
+    public void F1_ManualSelection_StillOverridesForNonMirrorVirtualNic()
+    {
+        // 回归守卫：镜像闸不得把"手动覆盖"这个功能本身掐死 ——
+        // 用户手选非镜像的 Hyper-V vEthernet 仍必须生效。
+        var selected = NetworkMonitor.SelectInterfaceIds(
+            [HwEthernet(), HyperVDefault()],
+            Select(HyperVDefaultGuid));
+
+        Assert.Equal([HyperVDefaultGuid], selected);
+    }
+
     [Fact]
     public void ManualSelection_IsCaseInsensitive()
     {
@@ -413,6 +487,73 @@ public class NetworkMonitorNicSelectionTests
         finally
         {
             NetworkMonitor.ResetBindingProvider();
+        }
+    }
+
+    // ================================================================
+    // ⑧ F1 端到端（真实网络栈 + 真实 settings.json）
+    // ================================================================
+
+    /// <summary>
+    /// 直接复现 t3 审查报告的场景：settings.json 写 {父网卡};{Kaspersky镜像} 双 GUID，
+    /// 调真实 <see cref="NetworkMonitor.GetPhysicalInterfaces"/>，断言镜像不被选中。
+    ///
+    /// 环境自适应：镜像接口是否存在取决于宿主装了哪些过滤驱动（本机有卡巴斯基）。
+    /// 无镜像时仍断言"结果里永远不含镜像"这条不变量，故在任何机器上都有意义、都不会假失败。
+    /// </summary>
+    [Fact]
+    public void F1_EndToEnd_DualGuidParentAndMirror_OnlyParentSelected()
+    {
+        var realPath = SensorChainConfig.ConfigPath;
+        string path = Path.Combine(Path.GetTempPath(), $"sysmon_f1_e2e_{Guid.NewGuid():N}.json");
+        try
+        {
+            SensorChainConfig.ConfigPath = path;
+
+            var all = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces();
+
+            // 找真实的镜像接口（描述/名字命中镜像 token）
+            var mirrors = all
+                .Where(ni => NetworkMonitor.IsFilterMirror(ni.Description, ni.Name))
+                .ToList();
+
+            // 找一个真实可生效的父网卡（非镜像、过硬门槛）
+            var parent = all.FirstOrDefault(ni =>
+                !NetworkMonitor.IsFilterMirror(ni.Description, ni.Name)
+                && NetworkMonitor.PassesHardGate(ni.OperationalStatus, ni.NetworkInterfaceType, ni.Speed));
+
+            // 无论如何：结果里不得出现任何镜像接口
+            if (mirrors.Count > 0 && parent is not null)
+            {
+                string dual = string.Join(";", new[] { parent.Id }.Concat(mirrors.Select(m => m.Id)));
+                File.WriteAllText(path, $"{{\"selectedNicGuids\":\"{dual}\"}}");
+                NetworkMonitor.ResetBindingProvider();
+
+                var selected = NetworkMonitor.GetPhysicalInterfaces();
+
+                Assert.DoesNotContain(selected, ni => NetworkMonitor.IsFilterMirror(ni.Description, ni.Name));
+                Assert.Single(selected);
+                Assert.Equal(parent.Id, selected[0].Id);
+
+                // 只选镜像 ⇒ 回退自动，仍不得返回镜像
+                File.WriteAllText(path, $"{{\"selectedNicGuids\":\"{mirrors[0].Id}\"}}");
+                NetworkMonitor.ResetBindingProvider();
+                var mirrorOnly = NetworkMonitor.GetPhysicalInterfaces();
+                Assert.DoesNotContain(mirrorOnly, ni => NetworkMonitor.IsFilterMirror(ni.Description, ni.Name));
+            }
+            else
+            {
+                // 无镜像可测时，仍验证不变量：自动模式结果里不得含镜像
+                NetworkMonitor.ResetBindingProvider();
+                var auto = NetworkMonitor.GetPhysicalInterfaces();
+                Assert.DoesNotContain(auto, ni => NetworkMonitor.IsFilterMirror(ni.Description, ni.Name));
+            }
+        }
+        finally
+        {
+            SensorChainConfig.ConfigPath = realPath;
+            NetworkMonitor.ResetBindingProvider();
+            try { File.Delete(path); } catch { }
         }
     }
 }

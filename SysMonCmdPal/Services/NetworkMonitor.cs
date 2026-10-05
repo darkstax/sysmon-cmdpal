@@ -52,13 +52,16 @@ internal sealed class NetworkMonitor : ISystemInfoSource
     ];
 
     /// <summary>
-    /// 过滤器镜像接口专属 token —— belt-and-suspenders。
+    /// 过滤器镜像接口专属 token —— 防流量翻倍的**最后防线**。
     ///
     /// 宿主机实测：卡巴斯基 NDIS 6 Filter / WFP / QoS 等镜像接口**根本不在注册表绑定表内**，
     /// 故天然落到 Unknown 走 <see cref="ExcludedDescriptionTokens"/>。但万一某个 Windows 版本
     /// 把镜像接口也写进绑定表并继承父网卡的 PnpInstanceID，白名单就会把它误判成
     /// PhysicalHardware 从而跳过黑名单 —— 流量翻倍问题复现。
     /// 这些 token 绝不可能出现在真硬件网卡描述里，故即使白名单命中也要排除。
+    ///
+    /// 注意：手动选择路径同样必须过这道闸（见 <see cref="IsFilterMirror"/>）——
+    /// 否则用户把父网卡和它的镜像一起选中就会双计，正是本机制要防的场景。
     /// </summary>
     private static readonly string[] FilterMirrorTokens =
     [
@@ -70,6 +73,15 @@ internal sealed class NetworkMonitor : ISystemInfoSource
         "Virtual WiFi Filter Driver",
         "Virtual Switch Extension",
     ];
+
+    /// <summary>
+    /// 是否为过滤器镜像接口（与父网卡字节计数重复，计入即流量翻倍）。
+    /// 唯一判据来源：自动路径（白名单命中时仍排除）、手动路径、设置页选项过滤
+    /// 三处共用，避免各写一份而漏掉某一层。
+    /// </summary>
+    internal static bool IsFilterMirror(string? description, string? name)
+        => ContainsAny(description ?? "", FilterMirrorTokens)
+        || ContainsAny(name ?? "", FilterMirrorTokens);
 
     private sealed class NetInterfaceState
     {
@@ -216,8 +228,9 @@ internal sealed class NetworkMonitor : ISystemInfoSource
     /// <summary>
     /// 三层判定链的纯函数核心（全部输入为值对象，可脱离真实网络栈单测）。
     ///   ① 硬门槛：Up + Ethernet/Wireless80211 + speed > 0
-    ///   ② 手动覆盖：manualSelection 非空时只保留选中接口 —— 跳过自动判定（白名单/黑名单都不否决），
-    ///      这是用户纠正自动误判的唯一出口
+    ///   ② 手动覆盖：manualSelection 非空时只保留选中接口 —— 跳过白名单/黑名单判定
+    ///      （这是用户纠正自动误判的唯一出口），但**不跳过镜像闸**：镜像接口与父网卡
+    ///      字节计数重复，选中它必然双计 ⇒ 必须排除。
     ///   ③ 硬件白名单：PhysicalHardware ⇒ 物理；Virtual ⇒ 排除；Unknown ⇒ 降级关键词黑名单
     ///
     /// 手动选中的网卡**全部消失**时回退自动判定，而不是返回空集合 ——
@@ -237,7 +250,11 @@ internal sealed class NetworkMonitor : ISystemInfoSource
                 c.Status, c.Type, c.Description, c.Name, c.Speed, c.Classification))
                 automatic.Add(c.Id);
 
-            if (manualSelection.Contains(c.Id) && PassesHardGate(c.Status, c.Type, c.Speed))
+            // 手动路径：硬门槛 + 镜像闸。镜像排除是防流量翻倍的最后防线，
+            // 用户显式选中也不能绕过（否则 {父网卡};{镜像} 会双计）。
+            if (manualSelection.Contains(c.Id)
+                && PassesHardGate(c.Status, c.Type, c.Speed)
+                && !IsFilterMirror(c.Description, c.Name))
                 manual.Add(c.Id);
         }
 
@@ -353,11 +370,10 @@ internal sealed class NetworkMonitor : ISystemInfoSource
         // 白名单命中 ⇒ 真硬件总线，关键词黑名单不再否决。
         if (classification == NicClassification.PhysicalHardware)
         {
-            // 唯一例外：过滤器镜像接口 token（绝不出现在真硬件描述里）。
+            // 唯一例外：过滤器镜像接口（绝不出现在真硬件描述里）。
             // 宿主机实测镜像接口不在绑定表内，但防御未来 Windows 把父网卡 PnpInstanceID
             // 一并写进镜像接口子键的场景 —— 那会导致流量翻倍问题复现。
-            return !ContainsAny(desc, FilterMirrorTokens)
-                && !ContainsAny(ifaceName, FilterMirrorTokens);
+            return !IsFilterMirror(desc, ifaceName);
         }
 
         if (classification == NicClassification.Virtual)
