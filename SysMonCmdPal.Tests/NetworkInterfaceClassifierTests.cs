@@ -335,12 +335,160 @@ public class NetworkInterfaceClassifierTests
         Assert.Equal("auto", NetworkInterfaceClassifier.ResolveNicSelection(GuidHw2, choices, "auto"));
     }
 
+    [Fact]
+    public void Round3_SelectedUpMirror_ThroughProductionPath_NotReAddedAndConvergesToAuto()
+    {
+        // 组合回归（acceptance 第一条的原文："已选镜像（Up 状态）不被补回列表"）：
+        // 前两个用例分别覆盖了"PermanentlyUnavailable 不补回"与"Up+镜像⇒PermanentlyUnavailable"，
+        // 但都没有走**生产实际路径** ClassifyUsability → BuildNicChoices。
+        // 本用例把两段串起来，锁住"镜像优先于 Up 判定"这一顺序 ——
+        // 若将来有人把 Up 判定提到镜像之前，镜像就会变 Disconnected 而被补回，
+        // 本用例即失败（这正是 reviewer 指定的复审重点）。
+        var mirrors = new (string Id, string Name, string Desc)[]
+        {
+            ("{11111111-1111-1111-1111-111111111111}",
+                "以太网-Kaspersky Lab NDIS 6 Filter-0000",
+                "Realtek PCIe GbE Family Controller-Kaspersky Lab NDIS 6 Filter-0000"),
+            ("{22222222-2222-2222-2222-222222222222}",
+                "vSwitch (Default Switch)-Virtual Switch Extension Filter-0000",
+                "Hyper-V Virtual Switch Extension Adapter"),
+            ("{33333333-3333-3333-3333-333333333333}",
+                "以太网-QoS Packet Scheduler-0000",
+                "Realtek PCIe GbE Family Controller-QoS Packet Scheduler-0000"),
+        };
+
+        foreach (var (id, name, desc) in mirrors)
+        {
+            // 关键：status=Up 且 speed>0 —— 镜像必须是"看起来完全健康"的最坏形态
+            var usability = NetworkInterfaceClassifier.ClassifyUsability(
+                OperationalStatus.Up, NetworkInterfaceType.Ethernet,
+                speed: 1_000_000_000L, desc, name);
+            Assert.Equal(NicUsability.PermanentlyUnavailable, usability);
+
+            List<NicChoiceSource> nics =
+            [
+                new(GuidHw1, "以太网", "Realtek PCIe GbE Family Controller",
+                    NicClassification.PhysicalHardware, NicUsability.Effective),
+                new(id, name, desc, NicClassification.Unknown, usability),
+            ];
+
+            var choices = NetworkInterfaceClassifier.BuildNicChoices(
+                nics, KindLabel, "自动", currentValue: id, unavailableSuffix: "（未连接）");
+
+            Assert.DoesNotContain(choices, c => c.Value == id);
+            Assert.Equal("auto", NetworkInterfaceClassifier.ResolveNicSelection(id, choices, "auto"));
+        }
+    }
+
+    [Fact]
+    public void Round3_SelectedDisconnectedRealNic_ThroughProductionPath_ReAddedAndPreserved()
+    {
+        // 组合回归（acceptance 第二条）：走生产实际路径验证"临时断连被标注补回且值保留"。
+        var usability = NetworkInterfaceClassifier.ClassifyUsability(
+            OperationalStatus.Down, NetworkInterfaceType.Wireless80211,
+            speed: -1L, "Intel(R) Wi-Fi 6E AX210 160MHz", "WLAN");
+        Assert.Equal(NicUsability.Disconnected, usability);
+
+        List<NicChoiceSource> nics =
+        [
+            new(GuidHw1, "以太网", "Realtek PCIe GbE Family Controller",
+                NicClassification.PhysicalHardware, NicUsability.Effective),
+            new(GuidHw2, "WLAN", "Intel(R) Wi-Fi 6E AX210 160MHz",
+                NicClassification.PhysicalHardware, usability),
+        ];
+
+        var choices = NetworkInterfaceClassifier.BuildNicChoices(
+            nics, KindLabel, "自动", currentValue: GuidHw2, unavailableSuffix: "（未连接）");
+
+        // 补回 + 标注 + 值保留
+        Assert.Contains(choices, c => c.Value == GuidHw2);
+        Assert.Contains(choices, c => c.Value == GuidHw2 && c.Title.Contains("（未连接）"));
+        Assert.Equal(GuidHw2, NetworkInterfaceClassifier.ResolveNicSelection(GuidHw2, choices, "auto"));
+    }
+
+    [Fact]
+    public void Round3_SelectedUpZeroSpeed_ThroughProductionPath_NotReAddedNotLabeled()
+    {
+        // 组合回归（acceptance 第三条）：Up + speed<=0 走生产路径 ⇒ NotCollectable
+        // ⇒ 不补回、不标「未连接」（接口确实是 Up 的，标注会与事实不符）。
+        var usability = NetworkInterfaceClassifier.ClassifyUsability(
+            OperationalStatus.Up, NetworkInterfaceType.Ethernet,
+            speed: 0L, "Some Ethernet Adapter", "Ethernet 2");
+        Assert.Equal(NicUsability.NotCollectable, usability);
+
+        List<NicChoiceSource> nics =
+        [
+            new(GuidHw1, "以太网", "Realtek PCIe GbE Family Controller",
+                NicClassification.PhysicalHardware, NicUsability.Effective),
+            new(GuidHw2, "Ethernet 2", "Some Ethernet Adapter",
+                NicClassification.Unknown, usability),
+        ];
+
+        var choices = NetworkInterfaceClassifier.BuildNicChoices(
+            nics, KindLabel, "自动", currentValue: GuidHw2, unavailableSuffix: "（未连接）");
+
+        Assert.DoesNotContain(choices, c => c.Value == GuidHw2);
+        Assert.DoesNotContain(choices, c => c.Title.Contains("（未连接）"));
+        Assert.Equal("auto", NetworkInterfaceClassifier.ResolveNicSelection(GuidHw2, choices, "auto"));
+    }
+
+    [Fact]
+    public void Round3_DownStateMirror_IsPermanentlyUnavailable_NotDisconnected()
+    {
+        // 这是**唯一能锁住优先级顺序**的用例（mutation 测试发现）：
+        // 若把 `status != Up ⇒ Disconnected` 提到 `IsFilterMirror ⇒ PermanentlyUnavailable` 之前，
+        // Up 状态的镜像仍判 PermanentlyUnavailable（Up 分支不命中），mutation 不可见；
+        // 只有 **Down 状态的镜像**会翻转：原本 PermanentlyUnavailable（不补回、收敛 auto），
+        // 变异后变 Disconnected ⇒ 被补回列表并标「（未连接）」⇒ 用户又能选中镜像 ⇒ 流量翻倍。
+        //
+        // 宿主机实测有 16 个 Down 镜像（如 WLAN-Kaspersky Lab NDIS 6 Filter-0000），
+        // 故这不是理论构造，是真实存在的最坏形态。
+        const string downMirrorId = "{44444444-4444-4444-4444-444444444444}";
+        const string downMirrorName = "WLAN-Kaspersky Lab NDIS 6 Filter-0000";
+        const string downMirrorDesc = "Intel(R) Wi-Fi 6E AX210 160MHz-Kaspersky Lab NDIS 6 Filter-0000";
+
+        var usability = NetworkInterfaceClassifier.ClassifyUsability(
+            OperationalStatus.Down, NetworkInterfaceType.Wireless80211,
+            speed: -1L, downMirrorDesc, downMirrorName);
+
+        // 镜像优先于 Up 判定 ⇒ 即使 Down 也判 PermanentlyUnavailable（不可恢复）
+        Assert.Equal(NicUsability.PermanentlyUnavailable, usability);
+        Assert.NotEqual(NicUsability.Disconnected, usability);
+
+        List<NicChoiceSource> nics =
+        [
+            new(GuidHw1, "以太网", "Realtek PCIe GbE Family Controller",
+                NicClassification.PhysicalHardware, NicUsability.Effective),
+            new(downMirrorId, downMirrorName, downMirrorDesc,
+                NicClassification.Unknown, usability),
+        ];
+
+        var choices = NetworkInterfaceClassifier.BuildNicChoices(
+            nics, KindLabel, "自动", currentValue: downMirrorId, unavailableSuffix: "（未连接）");
+
+        // 不补回、不标注、收敛 auto
+        Assert.DoesNotContain(choices, c => c.Value == downMirrorId);
+        Assert.DoesNotContain(choices, c => c.Title.Contains("（未连接）"));
+        Assert.Equal("auto", NetworkInterfaceClassifier.ResolveNicSelection(downMirrorId, choices, "auto"));
+    }
+
     [Theory]
     // 镜像优先于一切：即便 Up + 有速度，也必须判 PermanentlyUnavailable（不可恢复）
     [InlineData(OperationalStatus.Up, NetworkInterfaceType.Ethernet, 1_000_000_000L,
         "Realtek PCIe GbE Family Controller-Kaspersky Lab NDIS 6 Filter-0000",
         "以太网-Kaspersky Lab NDIS 6 Filter-0000", NicUsability.PermanentlyUnavailable)]
     [InlineData(OperationalStatus.Up, NetworkInterfaceType.Ethernet, 1_000_000_000L,
+        "Hyper-V Virtual Switch Extension Adapter",
+        "vSwitch (Default Switch)-Virtual Switch Extension Filter-0000", NicUsability.PermanentlyUnavailable)]
+    // 关键：Down 状态的镜像仍须判 PermanentlyUnavailable（镜像优先于 Up 判定）——
+    // 宿主机实测有 16 个这类接口（如 WLAN-Kaspersky Lab NDIS 6 Filter-0000）。
+    [InlineData(OperationalStatus.Down, NetworkInterfaceType.Wireless80211, -1L,
+        "Intel(R) Wi-Fi 6E AX210 160MHz-Kaspersky Lab NDIS 6 Filter-0000",
+        "WLAN-Kaspersky Lab NDIS 6 Filter-0000", NicUsability.PermanentlyUnavailable)]
+    [InlineData(OperationalStatus.Down, NetworkInterfaceType.Wireless80211, -1L,
+        "Intel(R) Wi-Fi 6E AX210 160MHz-Native WiFi Filter Driver-0000",
+        "WLAN-Native WiFi Filter Driver-0000", NicUsability.PermanentlyUnavailable)]
+    [InlineData(OperationalStatus.NotPresent, NetworkInterfaceType.Ethernet, 0L,
         "Hyper-V Virtual Switch Extension Adapter",
         "vSwitch (Default Switch)-Virtual Switch Extension Filter-0000", NicUsability.PermanentlyUnavailable)]
     // 未连接 ⇒ 可恢复（即便 speed 是 -1）
